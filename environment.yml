@@ -1,0 +1,22 @@
+name: blockwise-mc
+channels:
+  - ilastik-forge
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - ilastikrag
+  - vigra
+  - scikit-learn
+  - h5py
+  - zarr>=2,<4
+  - nifty
+  - affogato
+  - numpy>=2
+  - pandas
+  - tqdm
+  - threadpoolctl
+  - numba
+  - scikit-image
+  - pytest
+  - pip

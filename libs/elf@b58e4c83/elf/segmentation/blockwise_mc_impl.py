@@ -81,8 +81,9 @@ def reduce_problem(graph, costs, merge_edges, n_threads):
     new_costs = edge_mapping.mapEdgeValues(costs, "sum", numberOfThreads=n_threads)
     assert len(new_uv_ids) == len(new_costs)
 
-    # build the new graph
-    n_new_nodes = int(new_uv_ids.max()) + 1
+    # build the new graph; use new_labels.max() so isolated nodes (no inter-block
+    # edges) are included even when their id doesn't appear in new_uv_ids.
+    n_new_nodes = int(new_labels.max()) + 1 if len(new_labels) > 0 else 1
     new_graph = nifty.graph.undirectedGraph(n_new_nodes)
     new_graph.insertEdges(new_uv_ids)
 
