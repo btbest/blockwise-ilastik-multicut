@@ -165,8 +165,15 @@ def create_test_ilp(output_path: str, seed: int = 42) -> None:
     df = _make_edge_features_df(edges, FEAT_COLS, rng)
 
     with h5py.File(output, "w") as f:
-        # Top-level metadata (ilastik writes these)
-        f.attrs["workflow"] = b"EdgeTrainingWithMulticutWorkflow"
+        # Top-level metadata – mirrors ProjectManager.createBlankProjectFile /
+        # saveProject.  workflowName is stored as a top-level HDF5 *dataset*
+        # (bytes-encoded), NOT as an attribute.
+        # Line 155  creates_dataset("workflowName", data=cls.__name__.encode())
+        # Line 311  overwrites it with workflow.workflowName (the human name).
+        # A fully saved project therefore contains the human-readable name.
+        f.create_dataset("workflowName", data=b"Edge Training With Multicut")
+        f.create_dataset("ilastikVersion", data=b"1.4.0")
+        f.create_dataset("time", data=b"Thu Jan  1 00:00:00 2025")
         applet = f.create_group(APPLET_GROUP)
 
         _write_feature_names(applet, FEATURE_NAMES)
