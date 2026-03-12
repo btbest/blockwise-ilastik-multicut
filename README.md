@@ -119,20 +119,60 @@ to the raw voxel data.
 
 ---
 
+## What you need before running inference
+
+Three inputs are required:
+
+1. **A trained `.ilp` project file** — created in ilastik's "Boundary-Based
+   Segmentation with Multicut" workflow. This contains the training annotations
+   and cached feature vectors used by `fit_classifier.py`.
+
+2. **Membrane probability predictions** (and any other channels used during
+   training) — these are **not** computed by this tool. Run ilastik's
+   **Pixel Classification** workflow (or any other boundary detector) on your
+   full volume first, then export the probability maps as HDF5 or zarr.
+
+3. **The raw data volume** you want to segment — only needed if raw intensity
+   was used as a channel during training (check with `read_feature_names`
+   below).
+
+There is **no separate `--input` flag**. All input volumes — raw data,
+membrane predictions, and any other channels — are provided together through
+`--channels` (see below).
+
+---
+
 ## Channel mapping
 
-The `FeatureNames` dict in the `.ilp` uses ilastik's internal channel names,
-e.g. `"Membrane Probabilities 0"` or `"Raw Data 0"`. At inference time the CLI
-needs to know which file / dataset corresponds to each channel name. This is
-provided via a `--channels` argument:
+During training, ilastik assigns each input channel an internal name such as
+`"Membrane Probabilities 0"` or `"Raw Data 0"`. The set of channels and their
+names for your project are stored in the `.ilp`'s `FeatureNames` group. You
+can inspect them before running inference:
+
+```python
+from ilp_reader import read_feature_names
+
+feature_names = read_feature_names("my_project.ilp")
+# → {"Membrane Probabilities 0": ["standard_edge_mean", ...], "Raw Data 0": [...]}
+```
+
+The `--channels` argument maps each of those internal names to the
+corresponding file on disk:
 
 ```
 --channels "Membrane Probabilities 0:/path/to/boundary.h5:/data"
            "Raw Data 0:/path/to/raw.h5:/data"
 ```
 
-The notebook version shows how to inspect the stored channel names first with
-`read_feature_names(ilp_path)`.
+- The name on the **left** of `:` must exactly match a key returned by
+  `read_feature_names`.
+- The **file path** (and optional HDF5 dataset key) on the right points to the
+  corresponding volume for the new data you want to segment.
+- You must supply **one entry per channel** that appears in `FeatureNames`.
+  Some projects use only membrane probabilities; others also include raw data.
+
+In other words, `--channels` is both the "here is the new volume to segment"
+argument *and* the channel-name mapping — there is no separate input flag.
 
 ---
 
@@ -163,7 +203,18 @@ the `.ilp` file.
 
 ## Usage
 
+### 0. Produce membrane probability predictions (prerequisite)
+
+Before running this tool, use **ilastik's Pixel Classification** workflow (or
+any other boundary detector) to generate membrane probability maps for the
+volume you want to segment. Export the result as HDF5 or zarr. If raw
+intensity was also used as a channel during training, keep that file handy too.
+
 ### 1. Inspect the `.ilp` file
+
+Check which channels and ilastikrag features were used during training. The
+channel names shown here are exactly what you will pass to `--channels` in
+steps 3a/3b.
 
 ```python
 from ilp_reader import discover_lanes, read_feature_names
@@ -172,9 +223,10 @@ from ilp_reader import discover_lanes, read_feature_names
 print(discover_lanes("my_project.ilp"))
 # → [0, 1, 2]  (trained on three 256³ crops)
 
-# See what channels and features were used during training
+# See which channels you must supply at inference time
 feature_names = read_feature_names("my_project.ilp")
 # → {"Membrane Probabilities 0": ["standard_edge_mean", ...], "Raw Data 0": [...]}
+# You must provide one --channels entry for every key in this dict.
 ```
 
 ### 2. Re-fit the sklearn classifier (all crops automatically)
@@ -189,6 +241,9 @@ python fit_classifier.py \
 ```
 
 ### 3a. Run blockwise multicut — in-memory (volumes that fit in RAM)
+
+Supply one `--channels` entry per channel from `read_feature_names`, mapping
+each ilastik channel name to the corresponding file for your new volume:
 
 ```bash
 python multicut_from_ilp.py \
