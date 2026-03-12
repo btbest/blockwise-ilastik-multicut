@@ -39,6 +39,19 @@ Lazy blockwise (large volumes, e.g. 20 GB):
         --block-shape 256 256 256 \\
         --halo 32 32 32
 
+Web / remote zarr (requires fsspec and aiohttp):
+
+    python multicut_from_ilp.py \\
+        --ilp my_project.ilp \\
+        --rf rf.pkl \\
+        --channels "Membrane Probabilities 0:https://webknossos.org/.../boundary.zarr/s0" \\
+                   "Raw Data 0:https://webknossos.org/.../raw.zarr/s0" \\
+        --lazy \\
+        --ws-tmp /scratch/ws_tmp.dat \\
+        --output-zarr segmentation.zarr \\
+        --block-shape 256 256 256 \\
+        --halo 32 32 32
+
 Channel names must match those stored in the .ilp FeatureNames group.
 Run: python -c "from ilp_reader import read_feature_names; print(read_feature_names('my.ilp'))"
 to inspect channel names.
@@ -61,20 +74,38 @@ from ilp_reader import read_feature_names
 # ---------------------------------------------------------------------------
 
 
+_URL_SCHEMES = ("http://", "https://", "s3://", "gs://", "ftp://")
+
+
 def _parse_channel_spec(spec: str):
     """
-    Parse "Channel Name:/path/to/file.h5:/dataset/key"
-    or    "Channel Name:/path/to/file.zarr"
-    Returns (channel_name, file_path, hdf5_key_or_None).
+    Parse a channel specification of one of these forms:
+
+        "Channel Name:/path/to/file.h5:/dataset/key"   – HDF5 with key
+        "Channel Name:/path/to/file.zarr"               – local zarr
+        "Channel Name:https://host/path/to/array.zarr"  – remote zarr URL
+
+    Returns (channel_name, file_path_or_url, hdf5_key_or_None).
+
+    URLs containing "://" are kept intact (not split further), so the colon
+    inside the scheme is never mistaken for a key separator.
     """
-    parts = spec.split(":")
-    if len(parts) < 2:
+    if ":" not in spec:
         raise ValueError(
             f"Channel spec must be 'ChannelName:/path/to/file[:key]', got: {spec!r}"
         )
-    channel_name = parts[0]
-    file_path = parts[1]
-    hdf5_key = parts[2] if len(parts) >= 3 else None
+    first_colon = spec.index(":")
+    channel_name = spec[:first_colon]
+    remainder = spec[first_colon + 1:]
+
+    # Remote URL: return the whole URL as the path (no key splitting).
+    if any(remainder.startswith(s) for s in _URL_SCHEMES):
+        return channel_name, remainder, None
+
+    # Local path – optionally followed by an HDF5 key after a second colon.
+    parts = remainder.split(":", 1)
+    file_path = parts[0]
+    hdf5_key = parts[1] if len(parts) == 2 else None
     return channel_name, file_path, hdf5_key
 
 
@@ -83,7 +114,9 @@ def _open_channel_lazy(path: str, key: str | None):
     Return a lazy array-like object for the channel data.
 
     For HDF5 files: returns the open h5py.Dataset (supports slice indexing).
-    For zarr: returns the zarr Array.
+    For local zarr stores: returns the zarr Array or Group item.
+    For remote URLs (http/https/s3/…): opens the zarr store via fsspec;
+      requires the ``fsspec`` package (and ``aiohttp`` for http/https URLs).
 
     The caller is responsible for keeping file handles open (see _ChannelStore).
     """
@@ -94,9 +127,24 @@ def _open_channel_lazy(path: str, key: str | None):
         return fh[key], fh  # (dataset, handle_to_close)
     try:
         import zarr
-        store = zarr.open(path, mode="r")
+
+        if any(path.startswith(s) for s in _URL_SCHEMES):
+            try:
+                import fsspec
+            except ImportError as exc:
+                raise ImportError(
+                    "fsspec is required to open remote zarr URLs. "
+                    "Install it with: pip install fsspec aiohttp"
+                ) from exc
+            mapper = fsspec.get_mapper(path)
+            store = zarr.open(mapper, mode="r")
+        else:
+            store = zarr.open(path, mode="r")
+
         arr = store[key] if key else store
         return arr, None  # zarr manages its own handles
+    except (ImportError, ValueError):
+        raise
     except Exception as exc:
         raise ValueError(f"Cannot open {path}: {exc}") from exc
 
