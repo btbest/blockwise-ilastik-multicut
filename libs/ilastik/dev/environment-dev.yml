@@ -1,0 +1,74 @@
+channels:
+  # ilastik-forge/label/patched-2 contains patched windows versions of pyshtools 4.13
+  - ilastik-forge/label/patched-2
+  - conda-forge
+  - ilastik-forge
+dependencies:
+  - python 3.11.*
+  - numpy 1.*
+  - cachetools
+  - dpct
+  - fastfilters
+  - future
+  - greenlet
+  - grpcio >=1.49.1
+  - h5py
+  - hytra
+  - ilastik-feature-selection
+  - ilastikrag >=0.1.4
+  - ilastiktools
+  - jsonschema
+  - mamutexport
+  - marching_cubes
+  - ndstructs
+  - nifty
+  - pandas 2.*
+  - platformdirs
+  - psutil
+  - pydantic
+  - pyopengl
+  - pyqt 5.15.*
+  # pyqtgraph 0.14.0 results in non-functional 3dvp on win, no mesh display on mac
+  - pyqtgraph <0.14
+  # previous versions would set thread limits globally with side effects
+  - python-elf >= 0.4.8
+  - qimage2ndarray
+  - qtpy
+  - scikit-image
+  # There seems to be a problem with scikit-learn 1.7.0, test testContourMWTExport breaks
+  - scikit-learn <=1.6.1
+  # for python 3.7 compatible environment use
+  # tiffile >2020.9.22,<=2021.11.2
+  - tifffile >=2022
+  - vigra 1.12.1
+  # xarray versions not compatible with numpy 1.21, 2023.08.0 might be, but lost trust
+  # 2023.10.1 correctly pins numpy to 1.22 and up
+  - xarray !=2023.8.0,!=2023.9.0,!=2023.10.0
+  - z5py
+  - zarr 2.*
+  - aiohttp
+  - fsspec
+  - s3fs >=2022.8.2
+
+  # Deep learning dependencies (neural net workflow, trainable domain adaptation)
+  # can be changed to request gpu versions by uncommenting the following line:
+  # - pytorch=*=*cuda*
+  - pytorch 2.7.*
+  - torchvision>=0.21
+  - tiktorch 26.2.1
+
+  # TODO: investigate pytorch-3dunet dependency changes 1.9.3 and up #3079
+  - pytorch-3dunet 1.9.2
+
+  # Third-party object feature plugins
+  - sphericaltexture_plugin
+  # TODO: sphericaltexture 0.1.1 currently times out in the tests
+  - sphericaltexture 0.0.4
+  - pyshtools >=4.13
+
+  # dev-only dependencies
+  - conda-build
+  - mypy
+  - pre-commit
+  - pytest >4
+  - pytest-qt

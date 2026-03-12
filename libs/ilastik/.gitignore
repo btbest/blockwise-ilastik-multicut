@@ -1,0 +1,85 @@
+*~
+build
+tests/*.h5
+!tests/data/inputdata/smallVideo.h5
+!tests/data/inputdata/smallVideoSimpleSegmentation.h5
+!tests/data/inputdata/mitocheck_2d+t/mitocheck_small_2D+t.h5
+!tests/data/inputdata/mitocheck_2d+t/mitocheck_small_2D+t_export.h5
+
+*.pyc
+*.goutputstream
+*.pyo
+*.kdev4
+.DS_Store
+
+*/*.pyc
+*.*~
+tests/*.png
+tests/images
+.project
+*.h5
+.pydevproject
+
+build/
+dist/
+ilastik_core.egg-info/
+lazyflow.egg-info/
+
+.settings
+
+test.svg
+geany_run_script.bat
+
+*.lp
+*.log
+*.orig
+ilastik/applets/counting/cwrapper/gurobi
+ilastik/applets/counting/cwrapper/cplex
+CMakeFiles
+CMakeCache*
+*.cmake
+ilastik/applets/counting/cwrapper/Makefile
+
+# PyCharm project folder
+.idea
+
+# Vim swap files
+*.un~
+.netrwhist
+
+# Ctags file
+tags
+# cscope output
+cscope.out
+
+# qt designer autosave
+*.autosave
+
+tests/recorded_test_cases/ObjectClassification/cube_objects_binary.npy
+tests/recorded_test_cases/ObjectClassification/cube_objects_raw.npy
+
+# mergetool backups
+*.py.BACKUP.*.py
+*.py.BASE.*.py
+*.py.LOCAL.*.py
+*.py.REMOTE.*.py
+*.py.orig.*.py
+
+# pycharm project settings folder
+.idea/
+
+
+# vim undo/swp file
+*.un~
+*.swp
+docs/**/_build
+
+.coverage
+*.backup
+*.*~
+*.jpg
+*.swp
+coverage.xml
+
+# setuptools_scm version
+ilastik/_version.py

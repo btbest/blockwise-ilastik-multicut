@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 120
+target-version = ["py38", "py39", "py310", "py311"]
+
+
+[tool.isort]
+line_length = 120
+multi_line_output = 3
+include_trailing_comma = true

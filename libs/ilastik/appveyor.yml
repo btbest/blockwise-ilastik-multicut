@@ -1,0 +1,45 @@
+image: Visual Studio 2019
+
+clone_folder: c:\projects\ilastik
+
+environment:
+  ENV_NAME: test-env
+  # set miniconda version explicitly
+  MINIFORGE: C:\Miniforge
+  IlASTIK_ROOT: C:\ilastik
+  VOLUMINA_SHOW_3D_WIDGET: 0
+  APPVEYOR_CACHE_ENTRY_ZIP_ARGS: -xr!*/ -ir-!*.tar.bz2 -ir-!*.conda  # Exclude directories only cache downloaded tars
+
+
+install:
+  - ps: |
+        if (!(Test-Path $env:MINIFORGE)) {
+          Write-Output "Downloading and installing Miniforge"
+          Invoke-WebRequest https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe -OutFile miniforge.exe
+          Start-Process -FilePath "miniforge.exe" -ArgumentList "/NoRegistry=1","/S","/D=$env:MINIFORGE" -Wait
+        }
+        else {
+          Write-Output "Using cached Miniforge install"
+        }
+  - cmd: set PATH=%MINIFORGE%;%MINIFORGE%\Scripts;%MINIFORGE%\Library\bin;%PATH%
+  - cmd: conda config --set always_yes yes --set changeps1 no --set channel_priority strict
+  - cmd: conda update -n base -c conda-forge conda
+  - cmd: conda install -n base -c conda-forge setuptools_scm
+  - |
+    conda env create --name %ENV_NAME% --file dev\environment-dev.yml
+    conda install --name %ENV_NAME% --freeze-installed -c conda-forge -c ilastik-forge volumina
+    conda run -n %ENV_NAME% pip install -e .
+  - conda clean -p
+
+build: off
+
+test_script:
+  - cmd: CALL activate %ENV_NAME%
+  - cmd: set VOLUMINA_SHOW_3D_WIDGET=0
+  - cmd: pytest --run-legacy-gui
+
+cache:
+  - C:\Miniforge\pkgs -> appveyor.yml, dev\environment-dev.yml
+
+# on_finish:
+#  - ps: $blockRdp = $true; iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))

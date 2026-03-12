@@ -1,0 +1,216 @@
+{% set setup_py_data = load_setup_py_data(setup_file='../setup.py', from_recipe_dir=True) %}
+
+package:
+  name: ilastik-package-meta-recipe
+  version: {{ setup_py_data.version }}
+
+source:
+  path: ..
+
+
+outputs:
+  - name: ilastik-core
+
+    build:
+      number: 0
+      noarch: python
+      script_env:
+        - SETUPTOOLS_SCM_PRETEND_VERSION={{ setup_py_data.version }}
+      script:
+        - python -m pip install . --no-deps --ignore-installed --no-cache-dir -vvv
+    requirements:
+      host:
+        - python >=3.10
+        - pip
+        - setuptools >=40.0
+        - setuptools_scm
+      run:
+        - python >=3.10
+        - numpy >1.12,<1.27
+        # aiohttp to enable zarr.storage.FSStore
+        - aiohttp
+        - cachetools
+        - certifi
+        - dpct
+        - fastfilters
+        # fsspec to enable zarr.storage.FSStore
+        - fsspec
+        - future
+        - greenlet
+        - grpcio !=1.42.*
+        - h5py
+        - hytra >=1.1.5
+        - ilastik-feature-selection
+        - ilastikrag >=0.1.4
+        - ilastiktools
+        - jsonschema
+        - mamutexport
+        - marching_cubes
+        - ndstructs
+        - nifty
+        - pandas 2.*
+        - platformdirs
+        - psutil
+        - pydantic >2.10,<3
+        - pyopengl
+        - pyqt 5.15.*
+        # pyqtgraph 0.14.0 results in non-functional 3dvp on win, no mesh display on mac
+        - pyqtgraph <0.14
+        # previous versions would set thread limits globally with side effects
+        - python-elf >=0.4.8
+        # for neuroglancer precomputed chunks
+        - requests
+        # s3fs allows zarr.storage.FSStore to read s3:// URIs
+        - s3fs >=2022.8.2
+        - scikit-image
+        # There seems to be a problem with scikit-learn 1.7.0, test testContourMWTExport breaks
+        - scikit-learn <=1.6.1
+        - tifffile >=2022
+        - vigra 1.12.1
+        - xarray !=2023.8.0,!=2023.9.0,!=2023.10.0
+        - z5py
+        - zarr 2.*
+      run_constrained:
+        - tiktorch 26.2.1
+        # TODO: investigate pytorch-3dunet dependency changes 1.9.3 and up #3079
+        - pytorch-3dunet 1.9.2
+        - volumina >=1.3.20
+        # TODO: sphericaltexture 0.1.1 currently times out in the tests
+        - sphericaltexture 0.0.4
+        # pyshtools 4.10 conflicts with pytorch via openmp on windows
+        - pyshtools >=4.12
+
+    test:
+      imports:
+        - ilastik
+        - ilastik.experimental
+        - ilastik.config
+        - ilastik.applets
+        - ilastik.workflows
+        - lazyflow
+
+      source_files:
+        - ilastik
+        - lazyflow
+        - tests
+        - pytest.ini
+
+      requires:
+        - python 3.11
+        - pytest >4
+        - pytest-qt
+        - volumina
+
+      commands:
+        - pytest -v
+
+    about:
+      home: https://github.com/ilastik/ilastik
+      license: LGPL-2.1-or-later
+      summary: >
+        ilastik-core package enables ilastik-api usage to mix into environments.
+        ilastik is a simple, user-friendly tool for interactive image classification,
+        segmentation and analysis.
+
+
+  - name: ilastik
+    build:
+      noarch: python
+      entry_points:
+        - ilastik = ilastik_scripts.ilastik_startup:main
+    requirements:
+      run:
+        - python 3.11.*
+        - {{ pin_subpackage("ilastik-core", exact=True) }}
+        - pytorch >=2
+        - tiktorch
+        - torchvision
+        - volumina
+        # Third-party object feature plugins
+        - sphericaltexture_plugin
+
+    test:
+      source_files:
+        - ilastik
+        - lazyflow
+        - tests
+        - pytest.ini
+
+      requires:
+        - pytest >4
+        - pytest-qt
+        - pytorch 2.*
+
+      imports:
+        - ilastik
+        - ilastik.experimental
+        - ilastik.config
+        - ilastik.applets
+        - ilastik.workflows
+        - lazyflow
+        - tiktorch
+
+      commands:
+        - ilastik --help
+        - pytest -v
+
+    about:
+      home: https://github.com/ilastik/ilastik
+      license: LGPL-2.1-or-later
+      summary: >
+        ilastik conda package to create ilastik gui environments.
+        ilastik is a simple, user-friendly tool for interactive image classification,
+        segmentation and analysis.
+
+
+  - name: ilastik-gpu
+    build:
+      noarch: python
+      entry_points:
+        - ilastik = ilastik_scripts.ilastik_startup:main
+    requirements:
+      run:
+        - python 3.11.*
+        - {{ pin_subpackage("ilastik-core", exact=True) }}
+        - pytorch >=2
+        - pytorch *=*cuda*
+        - tiktorch
+        - torchvision
+        - volumina
+        # Third-party object feature plugins
+        - sphericaltexture_plugin
+
+    test:
+      source_files:
+        - ilastik
+        - lazyflow
+        - tests
+        - pytest.ini
+
+      requires:
+        - pytest >4
+        - pytest-qt
+        - pytorch 2.*
+
+      imports:
+        - ilastik
+        - ilastik.experimental
+        - ilastik.config
+        - ilastik.applets
+        - ilastik.workflows
+        - lazyflow
+        - tiktorch
+        - torch
+        - vigra
+
+      commands:
+        - ilastik --help
+        - pytest -v
+
+    about:
+      home: https://github.com/ilastik/ilastik
+      license: LGPL-2.1-or-later
+      summary: >
+        ilastik conda package to create ilastik gpu-enabled gui environments.
+        ilastik is a simple, user-friendly tool for interactive image classification,
+        segmentation and analysis.

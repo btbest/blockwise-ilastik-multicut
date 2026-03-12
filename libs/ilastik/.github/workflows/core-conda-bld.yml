@@ -1,0 +1,158 @@
+name: conda-package
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  conda-noarch-build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          auto-activate-base: true
+          activate-environment: ""
+          channel-priority: strict
+          miniforge-version: latest
+          conda-solver: libmamba
+          conda-remove-defaults: "true"
+      - name: install xvfb/deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -yy libgl1-mesa-dev xvfb curl
+      - name: install common conda dependencies
+        run: conda install -n base -c conda-forge conda-build setuptools_scm -y
+      - uses: actions/cache@v5
+        with:
+          path: |
+            pkgs/noarch
+            pkgs/channeldata.json
+          key: ${{ github.sha }}-packages
+      - id: version
+        shell: bash -l {0}
+        run: |
+          vers=$( python setup.py --version )
+          echo "version=${vers}" >> $GITHUB_OUTPUT
+      - name: linux conda build test
+        shell: bash -l {0}
+        run: |
+          mkdir -p ./pkgs/noarch
+          conda-build -c conda-forge conda-recipe --no-test --output-folder ./pkgs
+
+  test-conda-packages:
+    needs: [conda-noarch-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+        ilastik_variant: ["ilastik-core", "ilastik", "ilastik-gpu"]
+        exclude:
+          - os: macos-latest
+            ilastik_variant: "ilastik-gpu"
+        include:
+          - ilastik_variant: "ilastik-core"
+            build_prefix: "py_"
+          - ilastik_variant: "ilastik-gpu"
+            cuda_version: "12.6"
+    runs-on: ${{ matrix.os }}
+    env:
+      ILASTIK_PACKAGE_NAME: ${{ matrix.ilastik_variant }}-${{ needs.conda-noarch-build.outputs.version }}-${{ matrix.build_prefix }}0.conda
+      CONDA_OVERRIDE_CUDA: ${{ matrix.cuda_version }}
+    steps:
+      # necessary on windows: https://github.com/actions/cache/issues/591#issuecomment-845132253
+      - name: "Use GNU tar instead BSD tar"
+        if: matrix.os == 'windows-latest'
+        shell: cmd
+        run: echo C:\Program Files\Git\usr\bin>>"%GITHUB_PATH%"
+      - uses: al-cheb/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 12GB
+          disk-root: "C:"
+        if: |
+          matrix.os == 'windows-latest' &&
+          matrix.ilastik_variant == 'ilastik-gpu'
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        # Need to free up space for the GPU job to finish - pytorch/libtorch got quite big from 2.8.0
+        if: |
+          matrix.os == 'ubuntu-latest' &&
+          matrix.ilastik_variant == 'ilastik-gpu'
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: conda-incubator/setup-miniconda@v3
+        if: matrix.os != 'windows-latest'
+        with:
+          auto-update-conda: true
+          auto-activate-base: true
+          activate-environment: ""
+          channel-priority: strict
+          miniforge-version: latest
+          conda-solver: libmamba
+          conda-remove-defaults: "true"
+      - uses: conda-incubator/setup-miniconda@v3
+        # we need to skip cleanup on windows currently, because it takes
+        # hours and stalls CI that way (run-post: false)
+        # ref: https://github.com/conda-incubator/setup-miniconda/issues/380
+        if: matrix.os == 'windows-latest'
+        with:
+          auto-update-conda: true
+          auto-activate-base: true
+          activate-environment: ""
+          channel-priority: strict
+          miniforge-version: latest
+          conda-solver: libmamba
+          conda-remove-defaults: "true"
+          run-post: false
+      - name: install xvfb/deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -yy mesa-utils libgl1-mesa-dev xvfb curl
+      - name: install common conda dependencies
+        run: conda install -n base -c conda-forge conda-build setuptools_scm -y
+      - uses: actions/cache@v5
+        with:
+          path: |
+            pkgs/noarch
+            pkgs/channeldata.json
+          key: ${{ github.sha }}-packages
+          enableCrossOsArchive: true
+      - name: linux test
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash -l {0}
+        run: |
+          xvfb-run --server-args="-screen 0 1024x768x24" conda-build --test --override-channels \
+            -c ./pkgs -c conda-forge -c ilastik-forge \
+            ./pkgs/noarch/${ILASTIK_PACKAGE_NAME}
+      - name: osx test
+        if: matrix.os == 'macos-latest'
+        shell: bash -l {0}
+        run: |
+          VOLUMINA_SHOW_3D_WIDGET=0 conda-build --test --override-channels \
+            -c ./pkgs -c conda-forge -c ilastik-forge \
+            ./pkgs/noarch/${ILASTIK_PACKAGE_NAME}
+      - name: windows test
+        if: matrix.os == 'windows-latest'
+        shell: cmd /C CALL {0}
+        run: |
+          set VOLUMINA_SHOW_3D_WIDGET=0
+          conda build --test --override-channels ^
+            -c ./pkgs -c ilastik-forge/label/patched-2 -c conda-forge -c ilastik-forge ^
+            ./pkgs/noarch/%ILASTIK_PACKAGE_NAME%
