@@ -9,10 +9,14 @@ which is the projectFileGroupName used by EdgeTrainingWithMulticutWorkflow.
 
 Public API
 ----------
+discover_lanes(ilp_path)
+    Return sorted list of lane indices that have edge labels saved.
+
 read_feature_names(ilp_path)
     Returns the FeatureNames dict: {channel_name -> [feature_name, ...]}.
 
-read_training_data(ilp_path, lane=0)
+read_training_data(ilp_path, lane=None)
+    If lane is None (default), reads all lanes and concatenates.
     Returns (X, y, feature_columns) where X is a float32 ndarray of shape
     (N_annotated, N_features), y is a uint8 array of merge/split labels
     (1=merge, 2=split), and feature_columns is the list of feature names
@@ -76,6 +80,24 @@ def _dataframe_from_hdf5(h5_group):
 # ---------------------------------------------------------------------------
 # Public readers
 # ---------------------------------------------------------------------------
+
+
+def discover_lanes(ilp_path: str) -> list:
+    """
+    Return sorted list of lane indices that have edge labels saved in the .ilp.
+
+    A multi-lane project (e.g. trained on three 256³ crops) stores labels in
+    EdgeLabels0000, EdgeLabels0001, EdgeLabels0002 etc.  This function
+    discovers which ones are present.
+
+    Returns
+    -------
+    list[int]  e.g. [0, 1, 2]
+    """
+    with h5py.File(ilp_path, "r") as f:
+        keys = list(f[APPLET_GROUP]["EdgeLabelsDict"].keys())
+    # keys look like "EdgeLabels0000"; strip the prefix to get the index
+    return sorted(int(k[len("EdgeLabels"):]) for k in keys)
 
 
 def read_feature_names(ilp_path: str) -> dict:
@@ -164,31 +186,28 @@ def read_edge_features(ilp_path: str, lane: int = 0) -> pd.DataFrame:
     return df
 
 
-def read_training_data(ilp_path: str, lane: int = 0):
+def _read_single_lane(ilp_path: str, lane: int):
     """
-    Join EdgeFeatures with EdgeLabelsDict to produce a labeled training set.
+    Join EdgeFeatures with EdgeLabelsDict for one lane.
 
-    Returns
-    -------
-    X : np.ndarray  shape (N_annotated, N_features)  dtype float32
-        Feature matrix for the annotated edges only.
-    y : np.ndarray  shape (N_annotated,)              dtype uint8
-        Labels: 1 = merge, 2 = split / boundary.
-    feature_columns : list[str]
-        Names of the features (columns of X), in order.
-
-    Notes
-    -----
-    Only edges that appear in EdgeLabelsDict are returned.  The sp1/sp2
-    columns are excluded from X.
+    Returns (X, y, feature_columns) or raises ValueError / KeyError if data
+    is not available for the given lane.
     """
-    features_df = read_edge_features(ilp_path, lane=lane)
+    import warnings
+
     labels_dict = read_edge_labels(ilp_path, lane=lane)
-
     if not labels_dict:
         raise ValueError(
-            f"No edge labels found in lane {lane} of {ilp_path}. "
-            "Make sure the project has been annotated and saved."
+            f"No edge labels found in lane {lane} of {ilp_path}."
+        )
+
+    try:
+        features_df = read_edge_features(ilp_path, lane=lane)
+    except KeyError:
+        raise KeyError(
+            f"EdgeFeatures not found for lane {lane} in {ilp_path}. "
+            "Open the project in ilastik, trigger training (or live update), "
+            "and re-save before extracting the classifier."
         )
 
     # Build index: (sp1, sp2) → row position in features_df
@@ -210,13 +229,69 @@ def read_training_data(ilp_path: str, lane: int = 0):
         y_vals.append(lbl)
 
     if missing:
-        import warnings
         warnings.warn(
-            f"{missing} annotated edges were not found in the EdgeFeatures "
-            "cache. They will be skipped. Re-save the project with features "
-            "computed to avoid this."
+            f"Lane {lane}: {missing} annotated edges were not found in the "
+            "EdgeFeatures cache and will be skipped."
         )
 
-    X = np.array(X_rows, dtype=np.float32)
-    y = np.array(y_vals, dtype=np.uint8)
-    return X, y, feature_cols
+    return (
+        np.array(X_rows, dtype=np.float32),
+        np.array(y_vals, dtype=np.uint8),
+        feature_cols,
+    )
+
+
+def read_training_data(ilp_path: str, lane=None):
+    """
+    Join EdgeFeatures with EdgeLabelsDict to produce a labeled training set.
+
+    Parameters
+    ----------
+    ilp_path : str
+    lane : int or None
+        If None (default), all lanes with saved labels are read and their
+        training data is concatenated.  Pass an integer to read a single lane.
+
+    Returns
+    -------
+    X : np.ndarray  shape (N_annotated, N_features)  dtype float32
+        Feature matrix for the annotated edges only.
+    y : np.ndarray  shape (N_annotated,)              dtype uint8
+        Labels: 1 = merge, 2 = split / boundary.
+    feature_columns : list[str]
+        Names of the features (columns of X), in order.
+
+    Notes
+    -----
+    Only edges that appear in EdgeLabelsDict are returned.  The sp1/sp2
+    columns are excluded from X.  When reading multiple lanes, the feature
+    column names are taken from the first successfully read lane (they are
+    identical across lanes for a given project).
+    """
+    import warnings
+
+    if lane is not None:
+        return _read_single_lane(ilp_path, lane)
+
+    lanes = discover_lanes(ilp_path)
+    if not lanes:
+        raise ValueError(f"No edge label groups found in {ilp_path}.")
+
+    all_X, all_y, feature_cols = [], [], None
+    for l in lanes:
+        try:
+            X, y, cols = _read_single_lane(ilp_path, l)
+            all_X.append(X)
+            all_y.append(y)
+            if feature_cols is None:
+                feature_cols = cols
+        except (KeyError, ValueError) as exc:
+            warnings.warn(f"Skipping lane {l}: {exc}")
+
+    if not all_X:
+        raise ValueError(
+            f"No usable training data found in any lane of {ilp_path}. "
+            "Make sure at least one lane has both labels and cached features."
+        )
+
+    return np.concatenate(all_X), np.concatenate(all_y), feature_cols

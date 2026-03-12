@@ -43,13 +43,15 @@ are all under `Training and Multicut/` (the `projectFileGroupName`):
 └── Training and Multicut/
     ├── FeatureNames/           # dict: {channel_name → [ilastikrag feature names]}
     ├── EdgeLabelsDict/
-    │   └── EdgeLabels0000/
+    │   ├── EdgeLabels0000/     # one group per training crop (lane)
+    │   ├── EdgeLabels0001/
+    │   └── EdgeLabels0002/
     │       ├── sp_ids          # uint32 array (N, 2): superpixel id pairs
     │       └── labels          # uint8 array (N,):   1=merge  2=split
     ├── EdgeFeatures/
-    │   └── 0000/               # pandas DataFrame stored as HDF5:
-    │       ├── columns         #   sp1, sp2, <feature_1>, <feature_2>, ...
-    │       └── ...
+    │   ├── 0000/               # one group per lane; pandas DataFrame as HDF5:
+    │   ├── 0001/               #   sp1, sp2, <feature_1>, <feature_2>, ...
+    │   └── 0002/
     ├── Rags/                   # cached ilastikrag RAG (superpixel adjacency)
     │   └── Rag_0000/
     └── Output/                 # trained vigra random forest (not used directly)
@@ -71,37 +73,45 @@ space, so no feature re-computation is needed for the re-fit step.
 ### Training step (offline, runs on the `.ilp` file once)
 
 ```
-.ilp
-  ├── EdgeFeatures/0000  →  X  (N_edges × N_features float32 matrix)
-  └── EdgeLabelsDict/0000  →  y  (merge=1 / split=2, only for annotated edges)
+.ilp  (trained on N crops / lanes)
+  ├── EdgeFeatures/0000 … EdgeFeatures/000N  →  feature matrices per crop
+  └── EdgeLabelsDict/EdgeLabels0000 … 000N   →  merge/split labels per crop
 
-        join on (sp1, sp2)
+        discover_lanes() → [0, 1, 2, …]
+        concat across all lanes
               ↓
-  sklearn.RandomForestClassifier.fit(X_labeled, y_labeled)
+  sklearn.RandomForestClassifier.fit(X_all_lanes, y_all_lanes)
               ↓
   save sklearn RF as rf.pkl
 ```
 
 The resulting `rf.pkl` uses elf's expected sklearn interface:
-`rf.predict_proba(features)[:, 1]` → boundary probability per edge.
+`rf.predict_proba(features)[:, split_col]` → boundary probability per edge.
 
-### Inference step (blockwise, runs on new data)
+### Inference step — lazy/blockwise (for the full large volume)
 
 ```
-Raw data + boundary probability maps  (zarr / HDF5 / TIFF, any size)
+Large volume (zarr / HDF5, any size — never fully loaded)
               ↓
-  [for each block with halo]
-    elf watershed  →  superpixels (block)
-    ilastikrag.Rag(superpixels)
-    rag.compute_features(channel_data, feature_names)   ← same names as training
-    rf.predict_proba(features)[:, 1]                    ← sklearn RF
-    elf.segmentation.multicut.compute_edge_costs(probs)
-    accumulate edge costs into global graph
+  blockwise_two_pass_watershed(boundary_lazy, output=ws_memmap_on_disk)
               ↓
-  elf.segmentation.multicut.blockwise_multicut(graph, costs, watershed)
+  [for each block with halo — sequential, bounded RAM]
+    ws_block     = ws_memmap[outer_bb]        ← load one block from disk
+    channel_data = {name: lazy[outer_bb]}     ← load one block per channel
+    ilastikrag.Rag(ws_block)
+    rag.compute_features(channel_data, feature_names)
+    rf.predict_proba(features)[:, split_col]
+    accumulate → global edge cost dict (in RAM, ~1–5 GB)
               ↓
-  segmentation (zarr / HDF5 output)
+  nifty.graph.undirectedGraph + insertEdges(edge_uvs)
+              ↓
+  blockwise_multicut(graph, costs, ws_memmap)  ← ws read block-by-block ✓
+              ↓
+  [for each block] node_labels[ws_memmap[bb]] → write zarr output
 ```
+
+Memory peak: one block of input data + global edge dict (~10–15 GB total for a
+typical 20 GB volume).
 
 Memory is bounded per block. Only the global graph (superpixel adjacency + one
 float per edge) must be held in memory simultaneously, which is small compared
@@ -130,9 +140,9 @@ The notebook version shows how to inspect the stored channel names first with
 
 | File | Purpose |
 |------|---------|
-| `ilp_reader.py` | Read EdgeFeatures, EdgeLabelsDict, FeatureNames from `.ilp` (h5py only, no ilastik import) |
-| `fit_classifier.py` | Re-fit a sklearn RF from `.ilp` training data; save as pickle |
-| `multicut_from_ilp.py` | CLI: blockwise inference using the fitted RF and elf multicut |
+| `ilp_reader.py` | Read EdgeFeatures, EdgeLabelsDict, FeatureNames from `.ilp`; multi-lane aware |
+| `fit_classifier.py` | Re-fit a sklearn RF from all training crops; save as pickle |
+| `multicut_from_ilp.py` | CLI: in-memory or lazy blockwise inference using the fitted RF and elf multicut |
 | `multicut_from_ilp.ipynb` | Notebook: same pipeline, step-by-step with inspection utilities |
 
 ---
@@ -156,18 +166,18 @@ the `.ilp` file.
 ### 1. Inspect the `.ilp` file
 
 ```python
-from ilp_reader import read_feature_names, read_training_data
+from ilp_reader import discover_lanes, read_feature_names
+
+# See how many training crops are in the project
+print(discover_lanes("my_project.ilp"))
+# → [0, 1, 2]  (trained on three 256³ crops)
 
 # See what channels and features were used during training
 feature_names = read_feature_names("my_project.ilp")
 # → {"Membrane Probabilities 0": ["standard_edge_mean", ...], "Raw Data 0": [...]}
-
-# Load the (features, labels) training set
-X, y, columns = read_training_data("my_project.ilp")
-print(f"{len(y)} annotated edges, {X.shape[1]} features")
 ```
 
-### 2. Re-fit the sklearn classifier
+### 2. Re-fit the sklearn classifier (all crops automatically)
 
 ```bash
 python fit_classifier.py \
@@ -175,9 +185,10 @@ python fit_classifier.py \
     --output rf.pkl \
     --n-estimators 200 \
     --n-jobs 8
+# lane defaults to None → reads and concatenates all three crops
 ```
 
-### 3. Run blockwise multicut on a large volume
+### 3a. Run blockwise multicut — in-memory (volumes that fit in RAM)
 
 ```bash
 python multicut_from_ilp.py \
@@ -185,26 +196,46 @@ python multicut_from_ilp.py \
     --rf rf.pkl \
     --channels "Membrane Probabilities 0:boundary.h5:/data" \
                "Raw Data 0:raw.h5:/data" \
-    --output segmentation.h5 \
-    --output-key /seg \
-    --block-shape 256 256 256 \
-    --halo 32 32 32 \
-    --beta 0.5 \
-    --n-threads 8
+    --output segmentation.h5 --output-key /seg \
+    --block-shape 256 256 256 --halo 32 32 32 \
+    --beta 0.5 --n-threads 8
 ```
+
+### 3b. Run blockwise multicut — lazy mode (large volumes, e.g. 20 GB)
+
+```bash
+python multicut_from_ilp.py \
+    --ilp my_project.ilp \
+    --rf rf.pkl \
+    --channels "Membrane Probabilities 0:boundary.zarr" \
+               "Raw Data 0:raw.zarr" \
+    --lazy \
+    --ws-tmp /scratch/ws_tmp.dat \
+    --output-zarr segmentation.zarr \
+    --block-shape 256 256 256 --halo 32 32 32 \
+    --beta 0.5 --n-threads 8
+```
+
+In lazy mode, disk space of `volume_shape × 8 bytes` is needed for the
+watershed tempfile (`--ws-tmp`). This file is deleted automatically on
+successful completion.
 
 ---
 
 ## Memory usage
 
-- **Re-fit step**: negligible — reads a DataFrame from HDF5.
-- **Inference per block** (256³ with 32-voxel halo): a float32 raw block is
-  ~256 MB; superpixel labels add ~64 MB; features and RAG are small. Peak
-  usage per block is dominated by the input data, typically 0.5–1 GB.
-- **Global graph**: one float per edge. For a 1000³ volume with typical
-  superpixel densities (~1000 voxels/superpixel) there are O(10⁷) edges
-  → ~40 MB in float32. Elf's blockwise multicut then decomposes the
-  optimization problem without loading everything at once.
+- **Re-fit step**: negligible — reads DataFrames from HDF5 (one per crop).
+- **Lazy inference per block** (256³ + 32-voxel halo):
+  - Input data: ~0.5–1 GB per block (float32, 2 channels)
+  - Watershed: stored on disk as a numpy memmap (uint64, ≈ 8× raw voxel count
+    in bytes); never fully in RAM
+  - ilastikrag.Rag: only the block's superpixels are needed in RAM ✓
+- **Global edge dict**: all edge costs accumulated in a Python dict.
+  For a 20 GB uint8 volume with ~1000 voxels/superpixel there are O(10⁷)
+  edges → ~500 MB.
+- **blockwise_multicut**: reads the watershed memmap one block at a time via
+  `segmentation[bb]` (returns numpy from memmap) ✓
+- **Estimated peak RAM for a 20 GB volume**: ~10–15 GB.
 
 ---
 

@@ -37,7 +37,7 @@ from ilp_reader import read_feature_names, read_training_data
 
 def fit_rf_from_ilp(
     ilp_path: str,
-    lane: int = 0,
+    lane=None,
     n_estimators: int = 200,
     n_jobs: int = -1,
     random_state: int = 42,
@@ -50,8 +50,10 @@ def fit_rf_from_ilp(
     ----------
     ilp_path : str
         Path to the ilastik .ilp project file.
-    lane : int
-        Lane index (0 for single-lane projects).
+    lane : int or None
+        Lane index to read, or None (default) to read and concatenate all
+        lanes.  Use None for multi-lane projects (e.g. trained on several
+        sub-volume crops).
     n_estimators : int
         Number of trees in the random forest.
     n_jobs : int
@@ -75,8 +77,9 @@ def fit_rf_from_ilp(
     When class labels are exactly {1, 2}, ``rf.predict_proba(X)[:, 1]``
     gives P(split), which is the boundary probability expected by elf.
     """
+    lane_desc = "all lanes" if lane is None else f"lane {lane}"
     if verbose:
-        print(f"Reading training data from {ilp_path} (lane {lane}) …")
+        print(f"Reading training data from {ilp_path} ({lane_desc}) …")
 
     X, y, feature_cols = read_training_data(ilp_path, lane=lane)
 
@@ -127,7 +130,10 @@ def main():
     )
     parser.add_argument("--ilp", required=True, help="Path to ilastik .ilp project file")
     parser.add_argument("--output", required=True, help="Output path for pickled sklearn RF")
-    parser.add_argument("--lane", type=int, default=0, help="Lane index (default: 0)")
+    parser.add_argument(
+        "--lane", type=int, default=None,
+        help="Lane index (default: None = all lanes concatenated)",
+    )
     parser.add_argument("--n-estimators", type=int, default=200)
     parser.add_argument("--n-jobs", type=int, default=-1)
     parser.add_argument("--random-state", type=int, default=42)
