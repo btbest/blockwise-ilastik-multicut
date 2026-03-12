@@ -1,22 +1,26 @@
 name: blockwise-mc
 channels:
+  - ilastik-forge/label/patched-2
   - ilastik-forge
   - conda-forge
   - nodefaults
 dependencies:
   - python=3.11
-  - ilastikrag
-  - vigra
-  - scikit-learn
-  - h5py
-  - zarr>=2,<4
+  - numpy>=2
+  - ilastikrag>=0.1.4
+  - vigra=1.12.1
   - nifty
   - affogato
-  - numpy>=2
-  - pandas
-  - tqdm
-  - threadpoolctl
-  - numba
+  - scikit-learn<=1.6.1
   - scikit-image
+  - h5py
+  - zarr>=2,<4
+  - pandas>=2
+  - tqdm
+  - numba
   - pytest
   - pip
+  - pip:
+    # python-elf on conda-forge tops out at 0.4.7; the local snapshot
+    # (libs/elf@<hash>/) is 0.7.4 and is the intended version.
+    - --no-deps ./libs/elf@b58e4c83
