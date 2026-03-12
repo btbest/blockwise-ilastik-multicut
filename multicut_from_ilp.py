@@ -161,8 +161,12 @@ def compute_ilastikrag_features(
     """
     import ilastikrag
     import pandas as pd
+    import vigra
 
-    rag = ilastikrag.Rag(superpixels.astype(np.uint32))
+    ndim = superpixels.ndim
+    axes = "zyx"[-ndim:]
+    sp_vigra = vigra.taggedView(superpixels.astype(np.uint32), axes)
+    rag = ilastikrag.Rag(sp_vigra)
 
     feature_dfs = []
     for channel_name, feat_names in feature_names.items():
@@ -171,7 +175,7 @@ def compute_ilastikrag_features(
                 f"Channel {channel_name!r} is required by the classifier but "
                 f"was not provided. Available: {list(channel_data)}"
             )
-        data = np.asarray(channel_data[channel_name], dtype=np.float32)
+        data = vigra.taggedView(np.asarray(channel_data[channel_name], dtype=np.float32), axes)
         df = rag.compute_features(data, feat_names)
         feat_cols = [c for c in df.columns if c not in ("sp1", "sp2")]
         df = df[feat_cols].rename(
@@ -220,7 +224,7 @@ def _run_in_memory(
         )
     else:
         watershed, _ = distance_transform_watershed(
-            boundary_map, threshold=ws_threshold, sigma_seeds=ws_sigma, n_threads=n_threads,
+            boundary_map, threshold=ws_threshold, sigma_seeds=ws_sigma,
         )
     watershed = watershed.astype(np.uint32)
     n_labels = int(watershed.max()) + 1
