@@ -31,6 +31,7 @@ read_edge_labels(ilp_path, lane=0)
 """
 
 import ast
+import re
 
 import h5py
 import numpy as np
@@ -68,7 +69,13 @@ def _dataframe_from_hdf5(h5_group):
         col_repr = raw_col_idx.tobytes().decode("utf-8")
     else:
         col_repr = _decode(raw_col_idx)
-    columns = ast.literal_eval(col_repr)
+    # column_index is stored either as a Python list repr (['a', 'b', ...]) or
+    # as a numpy array repr (array(['a', 'b', ...], dtype=object)) depending on
+    # the ilastikrag version.  Try literal_eval first; fall back to regex.
+    try:
+        columns = ast.literal_eval(col_repr)
+    except (ValueError, SyntaxError):
+        columns = re.findall(r"'([^']*)'", col_repr)
 
     cols_group = h5_group["columns"]
     sorted_keys = sorted(cols_group.keys())
