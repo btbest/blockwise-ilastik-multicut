@@ -27,9 +27,9 @@ Input formats
 -------------
 Both --raw and --probabilities accept local zarr stores and HDF5 files:
 
-    /path/to/file.zarr           local zarr store (key inferred automatically)
-    /path/to/file.zarr:s0        local zarr store, sub-key 's0'
-    /path/to/file.h5:/data       HDF5 with explicit dataset key (required for h5)
+    /path/to/file.zarr           local zarr store
+    /path/to/file.h5             HDF5 file (must contain exactly one dataset)
+    C:\\Users\\...\\file.h5      Windows absolute paths are also supported
 
 Volumes must be in zyx axis order.  Both inputs must have the same shape.
 """
@@ -50,13 +50,14 @@ _URL_SCHEMES = ("http://", "https://", "s3://", "gs://", "ftp://")
 
 def _parse_data_path(spec: str):
     """
-    Parse 'path/to/file.h5:/key' or 'path/to/file.zarr' → (path, key_or_None).
-    Remote URLs are returned as-is with key=None.
+    Return (path, None) for any data path spec.
+
+    HDF5 dataset keys are no longer specified via colon notation; the single
+    dataset inside the file is auto-detected when it is opened.  This also
+    avoids misinterpreting Windows drive-letter colons (e.g. C:\\...) as key
+    separators.
     """
-    if any(spec.startswith(s) for s in _URL_SCHEMES):
-        return spec, None
-    parts = spec.split(":", 1)
-    return parts[0], (parts[1] if len(parts) == 2 else None)
+    return spec, None
 
 
 def _find_raw_channel(feature_names: dict) -> str:
@@ -71,7 +72,7 @@ def _find_raw_channel(feature_names: dict) -> str:
 
 
 def _build_channel_spec(channel_name: str, path: str, key) -> str:
-    return f"{channel_name}:{path}:{key}" if key else f"{channel_name}:{path}"
+    return f"{channel_name}:{path}"
 
 
 def main():
@@ -87,12 +88,12 @@ def main():
         help="Ilastik .ilp project file",
     )
     parser.add_argument(
-        "--raw", required=True, metavar="PATH[:KEY]",
-        help="Raw data volume (zarr or h5[:key]), zyx axis order",
+        "--raw", required=True, metavar="PATH",
+        help="Raw data volume (zarr or h5 with a single dataset), zyx axis order",
     )
     parser.add_argument(
-        "--probabilities", required=True, metavar="PATH[:KEY]",
-        help="Boundary probability volume (zarr or h5[:key]), zyx axis order",
+        "--probabilities", required=True, metavar="PATH",
+        help="Boundary probability volume (zarr or h5 with a single dataset), zyx axis order",
     )
     parser.add_argument(
         "--output-dir", required=True, metavar="DIR",

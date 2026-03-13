@@ -22,8 +22,8 @@ In-memory (small volumes):
     python multicut_from_ilp.py \\
         --ilp my_project.ilp \\
         --rf rf.pkl \\
-        --channels "Membrane Probabilities 0:/path/to/boundary.h5:/data" \\
-                   "Raw Data 0:/path/to/raw.h5:/data" \\
+        --channels "Membrane Probabilities 0:/path/to/boundary.h5" \\
+                   "Raw Data 0:/path/to/raw.h5" \\
         --output segmentation.h5 --output-key /seg
 
 Lazy blockwise (large volumes, e.g. 20 GB):
@@ -81,39 +81,35 @@ def _parse_channel_spec(spec: str):
     """
     Parse a channel specification of one of these forms:
 
-        "Channel Name:/path/to/file.h5:/dataset/key"   – HDF5 with key
-        "Channel Name:/path/to/file.zarr"               – local zarr
-        "Channel Name:https://host/path/to/array.zarr"  – remote zarr URL
+        "Channel Name:/path/to/file.h5"               – HDF5 (single dataset, auto-detected)
+        "Channel Name:/path/to/file.zarr"              – local zarr
+        "Channel Name:https://host/path/to/array.zarr" – remote zarr URL
+        "Channel Name:C:\\Users\\...\\file.h5"         – Windows absolute path
 
-    Returns (channel_name, file_path_or_url, hdf5_key_or_None).
+    Returns (channel_name, file_path_or_url, None).
 
-    URLs containing "://" are kept intact (not split further), so the colon
-    inside the scheme is never mistaken for a key separator.
+    Everything after the first colon is treated as the file path.  HDF5
+    dataset keys are no longer specified via colon notation; if an HDF5 file
+    contains more than one dataset a ValueError is raised when it is opened.
     """
     if ":" not in spec:
         raise ValueError(
-            f"Channel spec must be 'ChannelName:/path/to/file[:key]', got: {spec!r}"
+            f"Channel spec must be 'ChannelName:/path/to/file', got: {spec!r}"
         )
     first_colon = spec.index(":")
     channel_name = spec[:first_colon]
-    remainder = spec[first_colon + 1:]
-
-    # Remote URL: return the whole URL as the path (no key splitting).
-    if any(remainder.startswith(s) for s in _URL_SCHEMES):
-        return channel_name, remainder, None
-
-    # Local path – optionally followed by an HDF5 key after a second colon.
-    parts = remainder.split(":", 1)
-    file_path = parts[0]
-    hdf5_key = parts[1] if len(parts) == 2 else None
-    return channel_name, file_path, hdf5_key
+    file_path = spec[first_colon + 1:]
+    return channel_name, file_path, None
 
 
 def _open_channel_lazy(path: str, key: str | None):
     """
     Return a lazy array-like object for the channel data.
 
-    For HDF5 files: returns the open h5py.Dataset (supports slice indexing).
+    For HDF5 files: the file must contain exactly one dataset, which is
+      returned as an open h5py.Dataset (supports slice indexing).  Pass
+      key=None (default); a ValueError is raised if the file contains more
+      than one dataset.
     For local zarr stores: returns the zarr Array or Group item.
     For remote URLs (http/https/s3/…): opens the zarr store via fsspec;
       requires the ``fsspec`` package (and ``aiohttp`` for http/https URLs).
@@ -121,10 +117,24 @@ def _open_channel_lazy(path: str, key: str | None):
     The caller is responsible for keeping file handles open (see _ChannelStore).
     """
     if path.endswith(".h5") or path.endswith(".hdf5"):
-        if key is None:
-            raise ValueError(f"HDF5 key required for {path}")
         fh = h5py.File(path, "r")
-        return fh[key], fh  # (dataset, handle_to_close)
+        if key is not None:
+            return fh[key], fh
+        # Auto-detect the single dataset in the file.
+        datasets = []
+        fh.visititems(
+            lambda name, obj: datasets.append(name) if isinstance(obj, h5py.Dataset) else None
+        )
+        if len(datasets) == 0:
+            fh.close()
+            raise ValueError(f"No datasets found in HDF5 file: {path!r}")
+        if len(datasets) > 1:
+            fh.close()
+            raise ValueError(
+                f"HDF5 file {path!r} contains multiple datasets {datasets}. "
+                "The file must contain exactly one dataset."
+            )
+        return fh[datasets[0]], fh  # (dataset, handle_to_close)
     try:
         import zarr
 
@@ -294,7 +304,7 @@ def _run_in_memory(
     for spec in channel_specs:
         ch_name, fpath, fkey = _parse_channel_spec(spec)
         if verbose:
-            print(f"  Loading {ch_name!r} from {fpath}:{fkey} …")
+            print(f"  Loading {ch_name!r} from {fpath} …")
         channel_data[ch_name] = _load_channel(fpath, fkey)
 
     vol_shape = next(iter(channel_data.values())).shape
@@ -628,9 +638,10 @@ def main():
     parser.add_argument("--ilp", required=True)
     parser.add_argument("--rf", required=True, help="Pickled sklearn RF (from fit_classifier.py)")
     parser.add_argument(
-        "--channels", nargs="+", required=True, metavar="NAME:FILE[:KEY]",
+        "--channels", nargs="+", required=True, metavar="NAME:FILE",
         help=(
-            'Channel specs, e.g. "Membrane Probabilities 0:/boundary.h5:/data". '
+            'Channel specs, e.g. "Membrane Probabilities 0:/boundary.h5". '
+            "HDF5 files must contain exactly one dataset (auto-detected). "
             "Channel names must match those in the .ilp FeatureNames group."
         ),
     )
