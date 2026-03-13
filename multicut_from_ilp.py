@@ -67,6 +67,9 @@ import warnings
 import h5py
 import numpy as np
 
+from functools import reduce
+from operator import mul
+
 from ilp_reader import read_feature_names
 
 
@@ -253,6 +256,129 @@ class _Float32LazyArray:
 
     def __getitem__(self, key):
         return np.asarray(self._arr[key], dtype=np.float32)
+
+def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None, **kwargs):
+    """Wraps elf's distance_transform_watershed, handling flat / empty blocks.
+
+    When a block contains no pixels above *threshold* (or when the resulting
+    distance transform is entirely zero), elf's internal normalisation step
+    ``dt / dt.max()`` produces NaN which propagates into vigra and ultimately
+    causes a dtype mis-match crash (uint64 += float64).  Return an all-zero
+    (background) segmentation immediately in that case.
+    """
+    from elf.segmentation.watershed import distance_transform_watershed
+
+    # Use the masked region if a mask is provided, otherwise the full block.
+    effective = input_ if mask is None else input_[mask]
+    if effective.size == 0 or not (effective > threshold).any():
+        return np.zeros(input_.shape, dtype="uint64"), 0
+
+    return distance_transform_watershed(
+        input_, threshold=threshold, sigma_seeds=sigma_seeds, mask=mask, **kwargs
+    )
+
+
+def _bigintprod(nums) -> int:
+    """Product of an iterable using pure-Python integers.
+
+    numpy.prod(nifty_block_shape, dtype=uint64) silently returns float64 on
+    Windows when nifty exposes block-shape elements as 32-bit C integers:
+    once the accumulated product exceeds INT32_MAX (~2.1 B) numpy promotes the
+    accumulator to float64, ignoring the requested dtype.  Using Python's
+    arbitrary-precision integers avoids the issue entirely.
+    """
+    return reduce(mul, map(int, nums), 1)
+
+
+def _blockwise_two_pass_watershed(
+        input_, block_shape, halo, ws_function=None, n_threads=None,
+        mask=None, verbose=False, output=None, **kwargs
+):
+    """Drop-in replacement for elf's blockwise_two_pass_watershed.
+
+    Identical to the elf implementation except the offset computation uses
+    _bigintprod instead of np.prod to avoid a silent int32-overflow-to-float64
+    promotion that occurs on Windows when nifty blockShape elements are
+    32-bit C integers (offset = block_id * product_of_shape can exceed
+    INT32_MAX for large volumes with many blocks).
+    """
+    import multiprocessing
+    from concurrent import futures
+    import vigra
+    import nifty.tools as nt
+    from tqdm import tqdm
+    from elf.segmentation.watershed import distance_transform_watershed
+    from elf.util import divide_blocks_into_checkerboard
+
+    if ws_function is None:
+        ws_function = distance_transform_watershed
+
+    n_threads = multiprocessing.cpu_count() if n_threads is None else n_threads
+    if output is None:
+        output = np.zeros(input_.shape, dtype="uint64")
+    assert output.shape == input_.shape
+
+    blocking = nt.blocking([0, 0, 0], list(input_.shape), list(block_shape))
+    block_ids_pass_one, block_ids_pass_two = divide_blocks_into_checkerboard(blocking)
+
+    def run_block_one(block_id):
+        block = blocking.getBlockWithHalo(block_id, list(halo))
+        outer_bb = tuple(slice(s, e) for s, e in zip(block.outerBlock.begin, block.outerBlock.end))
+        input_block = input_[outer_bb]
+        mask_block = None if mask is None else mask[outer_bb]
+        ws, _ = ws_function(input_block, mask=mask_block, **kwargs)
+
+        inner_bb = tuple(slice(s, e) for s, e in zip(block.innerBlock.begin, block.innerBlock.end))
+        local_bb = tuple(slice(s, e) for s, e in zip(block.innerBlockLocal.begin, block.innerBlockLocal.end))
+        ws = vigra.analysis.labelMultiArrayWithBackground(ws[local_bb].astype("uint32")).astype("uint64")
+
+        # Use bigintprod to avoid silent int32-overflow-to-float64 on Windows.
+        offset = np.uint64(_bigintprod([block_id] + list(blocking.blockShape)))
+        if mask_block is None:
+            ws += offset
+        else:
+            ws[mask_block[local_bb]] += offset
+        output[inner_bb] = ws
+
+    with futures.ThreadPoolExecutor(n_threads) as tp:
+        list(tqdm(
+            tp.map(run_block_one, block_ids_pass_one), total=len(block_ids_pass_one),
+            desc="Run pass one of two-pass watershed",
+        )) if verbose else list(tp.map(run_block_one, block_ids_pass_one))
+
+    def run_block_two(block_id):
+        block = blocking.getBlockWithHalo(block_id, list(halo))
+        outer_bb = tuple(slice(s, e) for s, e in zip(block.outerBlock.begin, block.outerBlock.end))
+        input_block = input_[outer_bb]
+        mask_block = None if mask is None else mask[outer_bb]
+        seeds_block = output[outer_bb]
+
+        seeds_block, seed_max, seed_id_mapping = vigra.analysis.relabelConsecutive(
+            seeds_block, start_label=1, keep_zeros=True
+        )
+
+        ws, ws_max_id = ws_function(input_block, mask=mask_block, seeds=seeds_block, **kwargs)
+
+        inner_bb = tuple(slice(s, e) for s, e in zip(block.innerBlock.begin, block.innerBlock.end))
+        local_bb = tuple(slice(s, e) for s, e in zip(block.innerBlockLocal.begin, block.innerBlockLocal.end))
+        ws = ws[local_bb]
+
+        offset = _bigintprod([block_id] + list(blocking.blockShape))
+        id_mapping = {v: k for k, v in seed_id_mapping.items()}
+        assert 0 in id_mapping
+        id_mapping.update({seed_id: seed_id + offset for seed_id in range(seed_max + 1, ws_max_id + 1)})
+        ws = nt.takeDict(id_mapping, ws)
+
+        output[inner_bb] = ws
+
+    with futures.ThreadPoolExecutor(n_threads) as tp:
+        list(tqdm(
+            tp.map(run_block_two, block_ids_pass_two), total=len(block_ids_pass_two),
+            desc="Run pass two of two-pass watershed",
+        )) if verbose else list(tp.map(run_block_two, block_ids_pass_two))
+
+    _, max_id, _ = vigra.analysis.relabelConsecutive(output, out=output)
+    return output, max_id
 
 
 def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None, **kwargs):
@@ -465,7 +591,7 @@ def _run_lazy(
     import nifty
     import nifty.tools as nt
     from elf.segmentation.multicut import blockwise_multicut, compute_edge_costs
-    from elf.segmentation.watershed import blockwise_two_pass_watershed, stacked_watershed
+    from elf.segmentation.watershed import stacked_watershed
 
     try:
         import zarr
@@ -510,7 +636,7 @@ def _run_lazy(
                     f"  block_shape reduced {block_shape} → {ws_block_shape} "
                     f"(total block count must be even for checkerboard two-pass)"
                 )
-            _, max_id = blockwise_two_pass_watershed(
+            _, max_id = _blockwise_two_pass_watershed(
                 boundary_lazy,
                 block_shape=ws_block_shape,
                 halo=halo,
