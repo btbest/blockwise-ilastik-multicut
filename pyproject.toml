@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blockwise-ilastik-multicut"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[project.scripts]
+ilp-mc-block = "ilp_mc_block:main"
+
+[tool.setuptools]
+# Treat each top-level .py file as an importable module (no package directory).
+py-modules = [
+    "ilp_mc_block",
+    "ilp_reader",
+    "fit_classifier",
+    "multicut_from_ilp",
+]
