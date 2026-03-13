@@ -108,7 +108,7 @@ def test_open_channel_lazy_url_returns_array():
     arr, fh = _open_channel_lazy(EXAMPLE_URL, key=None)
     assert fh is None, "zarr manages its own handles; no external handle expected"
     assert hasattr(arr, "shape"), "returned object should expose a .shape attribute"
-    assert arr.ndim == 3, "example array is a 3-D volume"
+    assert arr.ndim == 5, "example array is tczyx (5-D, singleton t and z)"
 
 
 @network
@@ -131,9 +131,9 @@ def test_open_channel_lazy_url_slice_readable():
     import numpy as np
 
     arr, _ = _open_channel_lazy(EXAMPLE_URL, key=None)
-    # Read a tiny 4-voxel corner – should work regardless of chunk layout
-    chunk = np.array(arr[0:2, 0:2, 0:2])
-    assert chunk.shape == (2, 2, 2)
+    # Read a tiny corner – tczyx, singleton t and z, 3 channels
+    chunk = np.array(arr[0:1, 0:2, 0:1, 0:2, 0:2])
+    assert chunk.shape == (1, 2, 1, 2, 2)
 
 
 @network
@@ -145,5 +145,5 @@ def test_load_channel_url_returns_full_array():
 
     data = _load_channel(EXAMPLE_URL, key=None)
     assert isinstance(data, np.ndarray)
-    assert data.ndim == 3
+    assert data.ndim == 5, "example array is tczyx (5-D)"
     assert data.size > 0
