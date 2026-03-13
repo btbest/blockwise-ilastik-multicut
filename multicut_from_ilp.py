@@ -249,6 +249,7 @@ class _Float32LazyArray:
         self._arr = arr
         self.shape = arr.shape
         self.dtype = np.dtype("float32")
+        self.ndim = arr.ndim
 
     def __getitem__(self, key):
         return np.asarray(self._arr[key], dtype=np.float32)
