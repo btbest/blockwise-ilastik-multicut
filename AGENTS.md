@@ -22,12 +22,10 @@ micromamba create -f environment.yml -y
 micromamba activate blockwise-mc
 ```
 
-The `environment.yml` pip section automatically overrides the conda-forge
-`python-elf` with the local patched copy at `libs/elf@b58e4c83/`.  The
-conda-forge 0.7.4 release has a bug in `blockwise_mc_impl` where the reduced
-graph is sized from edge endpoints only, so isolated nodes (e.g. the phantom
-node 0 that arises from vigra's 1-indexed labels) trigger an `IndexError`.
-The local copy fixes this by sizing from `new_labels.max()` instead.
+The `environment.yml` pip section overrides the conda-forge
+`python-elf` with the local copy at `libs/elf@b58e4c83/` because 
+claude always seems to pull an old version from conda-forge.
+The user will pull python-elf from conda-forge and obtain the same version.
 
 ## Tests
 
