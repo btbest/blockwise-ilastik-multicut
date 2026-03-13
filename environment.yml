@@ -24,5 +24,3 @@ dependencies:
   - pip
   - python-elf
   - requests
-  - pip:
-    - --no-deps ./libs/elf@b58e4c83

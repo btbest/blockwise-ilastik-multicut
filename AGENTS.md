@@ -17,15 +17,23 @@ export MAMBA_ROOT_PREFIX=~/micromamba
 
 Create and activate the env (from repo root):
 
+1. Modify environment.yml to add:
+```
+  - pip:
+    - --no-deps ./libs/elf@b58e4c83
+```
+
+Overriding `python-elf` with the local copy at `libs/elf@b58e4c83/` 
+is necessary because claude always seems to pull an old version 
+from conda-forge.
+
+2. Then:
+
 ```bash
 micromamba create -f environment.yml -y
 micromamba activate blockwise-mc
 ```
 
-The `environment.yml` pip section overrides the conda-forge
-`python-elf` with the local copy at `libs/elf@b58e4c83/` because 
-claude always seems to pull an old version from conda-forge.
-The user will pull python-elf from conda-forge and obtain the same version.
 
 ## Tests
 
