@@ -7,9 +7,11 @@ All outputs land in --output-dir:
 
     rf.pkl                          sklearn classifier (reusable)
     <raw_stem>_segmentation.zarr    final segmentation (uint64, zyx)
+    <raw_stem>_watershed.zarr       watershed superpixels (kept with --keep-watershed)
     params.json                     exact call parameters for reproducibility
 
-    ws_tmp.dat is written to --output-dir during the run and deleted on success.
+Pass --keep-watershed to retain the watershed zarr for inspection or reuse.
+On a subsequent run pass --ws-zarr with its path to skip recomputation.
 
 Usage
 -----
@@ -140,6 +142,24 @@ def main():
         help="Multicut internal solver (default: kernighan-lin)",
     )
 
+    # Watershed reuse
+    parser.add_argument(
+        "--ws-zarr", default=None, metavar="PATH",
+        help=(
+            "Path to a pre-computed watershed zarr.  If supplied and valid the "
+            "watershed step is skipped entirely — useful for re-running only the "
+            "multicut with different parameters.  Implies --keep-watershed."
+        ),
+    )
+    parser.add_argument(
+        "--keep-watershed", action="store_true",
+        help=(
+            "Keep the watershed zarr after the run (default: delete it).  "
+            "The zarr is written to <output-dir>/<raw-stem>_watershed.zarr "
+            "and can be passed to --ws-zarr on a subsequent run."
+        ),
+    )
+
     args = parser.parse_args()
 
     # -----------------------------------------------------------------------
@@ -151,27 +171,38 @@ def main():
     raw_path, raw_key = _parse_data_path(args.raw)
     raw_stem = Path(raw_path).stem          # e.g. "my_raw" from "my_raw.zarr"
 
-    seg_zarr = str(out / f"{raw_stem}_segmentation.zarr")
-    rf_pkl   = str(out / "rf.pkl")
-    ws_tmp   = str(out / "ws_tmp.dat")
+    seg_zarr     = str(out / f"{raw_stem}_segmentation.zarr")
+    rf_pkl       = str(out / "rf.pkl")
+    default_ws   = str(out / f"{raw_stem}_watershed.zarr")
+
+    # If the user supplied --ws-zarr, use it as-is and never delete it.
+    # Otherwise use the default path and honour --keep-watershed.
+    if args.ws_zarr:
+        ws_zarr_path    = args.ws_zarr
+        keep_watershed  = True   # never delete a user-supplied watershed
+    else:
+        ws_zarr_path    = default_ws
+        keep_watershed  = args.keep_watershed
 
     # -----------------------------------------------------------------------
     # Save call parameters for reproducibility
     # -----------------------------------------------------------------------
     params = {
-        "ilp":          args.ilp,
-        "raw":          args.raw,
-        "probabilities": args.probabilities,
-        "output_dir":   str(out.resolve()),
+        "ilp":            args.ilp,
+        "raw":            args.raw,
+        "probabilities":  args.probabilities,
+        "output_dir":     str(out.resolve()),
         "max_block_shape": args.max_block_shape,
-        "halo":         args.halo,
-        "beta":         args.beta,
-        "threads":      args.threads,
-        "n_estimators": args.n_estimators,
-        "use_2dws":     args.use_2dws,
-        "ws_threshold": args.ws_threshold,
-        "ws_sigma":     args.ws_sigma,
-        "solver":       args.solver,
+        "halo":           args.halo,
+        "beta":           args.beta,
+        "threads":        args.threads,
+        "n_estimators":   args.n_estimators,
+        "use_2dws":       args.use_2dws,
+        "ws_threshold":   args.ws_threshold,
+        "ws_sigma":       args.ws_sigma,
+        "solver":         args.solver,
+        "ws_zarr":        ws_zarr_path,
+        "keep_watershed": keep_watershed,
     }
     params_file = out / "params.json"
     params_file.write_text(json.dumps(params, indent=2) + "\n")
@@ -229,7 +260,8 @@ def main():
         use_2dws=args.use_2dws,
         ws_threshold=args.ws_threshold,
         ws_sigma=args.ws_sigma,
-        ws_tmp_path=ws_tmp,
+        ws_zarr_path=ws_zarr_path,
+        keep_watershed=keep_watershed,
         verbose=True,
     )
 
