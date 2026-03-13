@@ -229,14 +229,30 @@ feature_names = read_feature_names("my_project.ilp")
 # You must provide one --channels entry for every key in this dict.
 ```
 
+The default feature names if the user makes no custom choices are as found in the example project file:
+
+```
+{
+'Raw Data': [
+    'standard_sp_mean', 
+    'standard_sp_quantiles_10', 
+    'standard_sp_quantiles_90'
+], 
+'wsdt boundary channel': [
+    'edgeregion_edge_regionradii_0', 
+    'edgeregion_edge_regionradii_1', 
+    'edgeregion_edge_regionradii_2', 
+    'standard_edge_mean', 
+    'standard_edge_quantiles_10', 
+    'standard_edge_quantiles_90'
+]
+}
+```
+
 ### 2. Re-fit the sklearn classifier (all crops automatically)
 
 ```bash
-python fit_classifier.py \
-    --ilp my_project.ilp \
-    --output rf.pkl \
-    --n-estimators 200 \
-    --n-jobs 8
+python fit_classifier.py --ilp my_project.ilp --output rf.pkl --n-estimators 100 --n-jobs 8
 # lane defaults to None → reads and concatenates all three crops
 ```
 
