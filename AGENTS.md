@@ -22,7 +22,12 @@ micromamba create -f environment.yml -y
 micromamba activate blockwise-mc
 ```
 
-If `python-elf` (0.7.4) is not on conda-forge; it can be pip-installed from `libs/elf@b58e4c83/`.
+The `environment.yml` pip section automatically overrides the conda-forge
+`python-elf` with the local patched copy at `libs/elf@b58e4c83/`.  The
+conda-forge 0.7.4 release has a bug in `blockwise_mc_impl` where the reduced
+graph is sized from edge endpoints only, so isolated nodes (e.g. the phantom
+node 0 that arises from vigra's 1-indexed labels) trigger an `IndexError`.
+The local copy fixes this by sizing from `new_labels.max()` instead.
 
 ## Tests
 

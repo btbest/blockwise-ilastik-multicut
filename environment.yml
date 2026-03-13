@@ -24,3 +24,8 @@ dependencies:
   - pip
   - python-elf
   - requests
+  - pip:
+    # Override the conda-forge python-elf with the local patched version.
+    # The conda-forge 0.7.4 release has a bug in blockwise_mc_impl where
+    # n_new_nodes is sized from edge endpoints only, missing isolated nodes.
+    - --no-deps ./libs/elf@b58e4c83
