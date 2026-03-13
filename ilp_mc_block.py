@@ -18,7 +18,7 @@ Usage
         --raw raw.zarr \\
         --probabilities boundary.zarr \\
         --output-dir results/ \\
-        [--block-shape 256 256 256] [--halo 32 32 32] \\
+        [--max-block-shape 256 256 256] [--halo 32 32 32] \\
         [--beta 0.5] [--threads 8] [--n-estimators 200] \\
         [--use-2dws] [--ws-threshold 0.5] [--ws-sigma 2.0] \\
         [--solver kernighan-lin]
@@ -102,9 +102,10 @@ def main():
 
     # Blockwise / multicut parameters
     parser.add_argument(
-        "--block-shape", type=int, nargs=3, default=[256, 256, 256],
+        "--max-block-shape", type=int, nargs=3, default=[256, 256, 256],
         metavar=("Z", "Y", "X"),
-        help="Block shape for blockwise processing (default: 256 256 256)",
+        help="Maximum block shape; actual shape may be slightly smaller to satisfy "
+             "checkerboard requirements (default: 256 256 256)",
     )
     parser.add_argument(
         "--halo", type=int, nargs=3, default=[32, 32, 32],
@@ -162,7 +163,7 @@ def main():
         "raw":          args.raw,
         "probabilities": args.probabilities,
         "output_dir":   str(out.resolve()),
-        "block_shape":  args.block_shape,
+        "max_block_shape": args.max_block_shape,
         "halo":         args.halo,
         "beta":         args.beta,
         "threads":      args.threads,
@@ -221,7 +222,7 @@ def main():
         output_zarr_path=seg_zarr,
         output_zarr_key="seg",
         beta=args.beta,
-        block_shape=tuple(args.block_shape),
+        block_shape=tuple(args.max_block_shape),
         halo=tuple(args.halo),
         internal_solver=args.solver,
         n_threads=args.threads,

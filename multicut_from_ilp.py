@@ -58,6 +58,7 @@ to inspect channel names.
 """
 
 import argparse
+import math
 import os
 import pickle
 import sys
@@ -67,6 +68,39 @@ import h5py
 import numpy as np
 
 from ilp_reader import read_feature_names
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_even_block_count(vol_shape, block_shape):
+    """Return a (possibly reduced) block_shape whose total block count is even.
+
+    ``elf``'s checkerboard two-pass watershed internally asserts that blocks
+    can be split into two equally-sized halves.  This is only possible when
+    the total number of blocks is even.  The total is odd when *all* per-axis
+    block counts are odd (odd × odd × … = odd).
+
+    Fix: find the first axis with an odd block count and *decrease* its block
+    size just enough so that axis gains one more block (making that count even).
+    The adjusted size is always ≤ the requested size, so memory usage stays
+    within the user's budget.
+    """
+    n_blocks = [math.ceil(s / b) for s, b in zip(vol_shape, block_shape)]
+    total = math.prod(n_blocks)
+    if total % 2 == 0:
+        return block_shape  # already fine
+
+    block_shape = list(block_shape)
+    for i, (s, b, n) in enumerate(zip(vol_shape, block_shape, n_blocks)):
+        if n % 2 == 1:
+            # Largest b_new such that ceil(s / b_new) == n + 1
+            new_n = n + 1
+            new_b = math.ceil(s / new_n)
+            block_shape[i] = new_b
+            break  # one even axis is enough to make the product even
+    return tuple(block_shape)
 
 
 # ---------------------------------------------------------------------------
@@ -431,9 +465,15 @@ def _run_lazy(
                 n_threads=n_threads, output=ws_memmap,
             )
         else:
+            ws_block_shape = _ensure_even_block_count(vol_shape, block_shape)
+            if ws_block_shape != block_shape and verbose:
+                print(
+                    f"  block_shape reduced {block_shape} → {ws_block_shape} "
+                    f"(total block count must be even for checkerboard two-pass)"
+                )
             _, max_id = blockwise_two_pass_watershed(
                 boundary_lazy,
-                block_shape=block_shape,
+                block_shape=ws_block_shape,
                 halo=halo,
                 threshold=ws_threshold,
                 sigma_seeds=ws_sigma,
@@ -667,7 +707,9 @@ def main():
     # Multicut / watershed parameters
     parser.add_argument("--beta", type=float, default=0.5)
     parser.add_argument(
-        "--block-shape", type=int, nargs="+", default=[256, 256, 256], metavar="N",
+        "--max-block-shape", type=int, nargs="+", default=[256, 256, 256], metavar="N",
+        help="Maximum block shape; actual shape may be slightly smaller to satisfy "
+             "checkerboard requirements (default: 256 256 256)",
     )
     parser.add_argument(
         "--halo", type=int, nargs="+", default=[32, 32, 32], metavar="N",
@@ -694,7 +736,7 @@ def main():
         output_zarr_key=args.output_zarr_key,
         lazy=args.lazy,
         beta=args.beta,
-        block_shape=tuple(args.block_shape),
+        block_shape=tuple(args.max_block_shape),
         halo=tuple(args.halo),
         internal_solver=args.solver,
         n_threads=args.n_threads,
