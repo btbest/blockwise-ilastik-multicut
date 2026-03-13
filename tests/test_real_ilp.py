@@ -439,13 +439,26 @@ def test_fit_rf_pickle_roundtrip(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_parse_channel_spec_h5_with_key():
+def test_parse_channel_spec_h5_no_key():
+    """Everything after the first colon is the path; key is always None."""
     from multicut_from_ilp import _parse_channel_spec
 
-    name, path, key = _parse_channel_spec("My Channel:/data/vol.h5:/raw")
+    name, path, key = _parse_channel_spec("My Channel:/data/vol.h5")
     assert name == "My Channel"
     assert path == "/data/vol.h5"
-    assert key == "/raw"
+    assert key is None
+
+
+def test_parse_channel_spec_windows_path():
+    """Windows drive-letter colon must not be mistaken for a key separator."""
+    from multicut_from_ilp import _parse_channel_spec
+
+    name, path, key = _parse_channel_spec(
+        "wsdt boundary channel:C:\\Users\\root\\EM\\em-data_Probabilities_zyx.h5"
+    )
+    assert name == "wsdt boundary channel"
+    assert path == "C:\\Users\\root\\EM\\em-data_Probabilities_zyx.h5"
+    assert key is None
 
 
 def test_parse_channel_spec_zarr_no_key():

@@ -85,13 +85,13 @@ def test_parse_channel_spec_local_zarr_still_works():
 
 
 def test_parse_channel_spec_local_h5_still_works():
-    """Existing HDF5 specs with keys must be unaffected."""
+    """HDF5 specs without keys work; everything after the first colon is the path."""
     from multicut_from_ilp import _parse_channel_spec
 
-    name, path, key = _parse_channel_spec("My Channel:/data/vol.h5:/raw")
+    name, path, key = _parse_channel_spec("My Channel:/data/vol.h5")
     assert name == "My Channel"
     assert path == "/data/vol.h5"
-    assert key == "/raw"
+    assert key is None
 
 
 # ---------------------------------------------------------------------------
