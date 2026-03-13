@@ -345,21 +345,21 @@ def test_fit_rf_returns_classifier():
     from fit_classifier import fit_rf_from_ilp
     from sklearn.ensemble import RandomForestClassifier
 
-    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10, verbose=False)
+    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10)
     assert isinstance(rf, RandomForestClassifier)
 
 
 def test_fit_rf_classes():
     from fit_classifier import fit_rf_from_ilp
 
-    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10, verbose=False)
+    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10)
     assert list(rf.classes_) == [1, 2]
 
 
 def test_fit_rf_n_features():
     from fit_classifier import fit_rf_from_ilp
 
-    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10, verbose=False)
+    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10)
     assert rf.n_features_in_ == 9
 
 
@@ -367,7 +367,7 @@ def test_fit_rf_predict_proba_shape():
     from fit_classifier import fit_rf_from_ilp
     from ilp_reader import read_training_data
 
-    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10, verbose=False)
+    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10)
     X, _, _ = read_training_data(str(EXAMPLE_ILP))
     proba = rf.predict_proba(X)
     assert proba.shape == (12, 2)
@@ -377,7 +377,7 @@ def test_fit_rf_predict_proba_sums_to_one():
     from fit_classifier import fit_rf_from_ilp
     from ilp_reader import read_training_data
 
-    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10, verbose=False)
+    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10)
     X, _, _ = read_training_data(str(EXAMPLE_ILP))
     proba = rf.predict_proba(X)
     np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
@@ -388,7 +388,7 @@ def test_fit_rf_split_proba_in_unit_interval():
     from fit_classifier import fit_rf_from_ilp
     from ilp_reader import read_training_data
 
-    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10, verbose=False)
+    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10)
     X, _, _ = read_training_data(str(EXAMPLE_ILP))
     split_col = int(np.argmax(rf.classes_))
     p_split = rf.predict_proba(X)[:, split_col]
@@ -398,7 +398,7 @@ def test_fit_rf_split_proba_in_unit_interval():
 def test_fit_rf_single_lane():
     from fit_classifier import fit_rf_from_ilp
 
-    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), lane=0, n_estimators=10, verbose=False)
+    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), lane=0, n_estimators=10)
     assert rf.n_features_in_ == 9
     assert list(rf.classes_) == [1, 2]
 
@@ -408,10 +408,10 @@ def test_fit_rf_reproducible():
     from ilp_reader import read_training_data
 
     rf1 = fit_rf_from_ilp(
-        str(EXAMPLE_ILP), n_estimators=10, random_state=0, verbose=False
+        str(EXAMPLE_ILP), n_estimators=10, random_state=0
     )
     rf2 = fit_rf_from_ilp(
-        str(EXAMPLE_ILP), n_estimators=10, random_state=0, verbose=False
+        str(EXAMPLE_ILP), n_estimators=10, random_state=0
     )
     X, _, _ = read_training_data(str(EXAMPLE_ILP))
     np.testing.assert_array_equal(
@@ -423,7 +423,7 @@ def test_fit_rf_pickle_roundtrip(tmp_path):
     from fit_classifier import fit_rf_from_ilp
     from ilp_reader import read_training_data
 
-    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10, verbose=False)
+    rf = fit_rf_from_ilp(str(EXAMPLE_ILP), n_estimators=10)
     pkl = tmp_path / "rf.pkl"
     with open(pkl, "wb") as fh:
         pickle.dump(rf, fh)
