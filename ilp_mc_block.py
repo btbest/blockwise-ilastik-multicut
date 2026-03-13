@@ -7,11 +7,12 @@ All outputs land in --output-dir:
 
     rf.pkl                          sklearn classifier (reusable)
     <raw_stem>_segmentation.zarr    final segmentation (uint64, zyx)
-    <raw_stem>_watershed.zarr       watershed superpixels (kept with --keep-watershed)
+    <raw_stem>_watershed.zarr       watershed superpixels (kept by default)
     params.json                     exact call parameters for reproducibility
 
-Pass --keep-watershed to retain the watershed zarr for inspection or reuse.
-On a subsequent run pass --ws-zarr with its path to skip recomputation.
+The watershed zarr is kept by default.  Pass --no-keep-watershed to delete it
+after the run.  On a subsequent run pass --ws-zarr with its path to skip
+recomputation.
 
 Usage
 -----
@@ -152,9 +153,10 @@ def main():
         ),
     )
     parser.add_argument(
-        "--keep-watershed", action="store_true",
+        "--keep-watershed", action=argparse.BooleanOptionalAction, default=True,
         help=(
-            "Keep the watershed zarr after the run (default: delete it).  "
+            "Keep the watershed zarr after the run (default: keep it).  "
+            "Pass --no-keep-watershed to delete it.  "
             "The zarr is written to <output-dir>/<raw-stem>_watershed.zarr "
             "and can be passed to --ws-zarr on a subsequent run."
         ),
@@ -216,7 +218,6 @@ def main():
         args.ilp,
         n_estimators=args.n_estimators,
         n_jobs=args.threads,
-        verbose=True,
     )
     with open(rf_pkl, "wb") as fh:
         pickle.dump(rf, fh)
@@ -262,7 +263,6 @@ def main():
         ws_sigma=args.ws_sigma,
         ws_zarr_path=ws_zarr_path,
         keep_watershed=keep_watershed,
-        verbose=True,
     )
 
     print("\n=== Done ===")

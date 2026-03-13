@@ -41,7 +41,6 @@ def fit_rf_from_ilp(
     n_estimators: int = 200,
     n_jobs: int = -1,
     random_state: int = 42,
-    verbose: bool = True,
 ) -> RandomForestClassifier:
     """
     Read training data from *ilp_path* and return a fitted sklearn RF.
@@ -60,8 +59,6 @@ def fit_rf_from_ilp(
         Number of parallel jobs for fitting (-1 = all CPUs).
     random_state : int
         Random seed for reproducibility.
-    verbose : bool
-        Print progress information.
 
     Returns
     -------
@@ -78,17 +75,15 @@ def fit_rf_from_ilp(
     gives P(split), which is the boundary probability expected by elf.
     """
     lane_desc = "all lanes" if lane is None else f"lane {lane}"
-    if verbose:
-        print(f"Reading training data from {ilp_path} ({lane_desc}) …")
+    print(f"Reading training data from {ilp_path} ({lane_desc}) …")
 
     X, y, feature_cols = read_training_data(ilp_path, lane=lane)
 
     classes, counts = np.unique(y, return_counts=True)
-    if verbose:
-        for cls, cnt in zip(classes, counts):
-            label_name = {1: "merge", 2: "split"}.get(int(cls), str(cls))
-            print(f"  class {cls} ({label_name}): {cnt} examples")
-        print(f"  {len(feature_cols)} features per edge")
+    for cls, cnt in zip(classes, counts):
+        label_name = {1: "merge", 2: "split"}.get(int(cls), str(cls))
+        print(f"  class {cls} ({label_name}): {cnt} examples")
+    print(f"  {len(feature_cols)} features per edge")
 
     if len(classes) < 2:
         raise ValueError(
@@ -97,17 +92,15 @@ def fit_rf_from_ilp(
             "extracting the classifier."
         )
 
-    if verbose:
-        fn = read_feature_names(ilp_path)
-        print("Feature names per channel:")
-        for ch, feats in fn.items():
-            print(f"  {ch}: {feats}")
+    fn = read_feature_names(ilp_path)
+    print("Feature names per channel:")
+    for ch, feats in fn.items():
+        print(f"  {ch}: {feats}")
 
-    if verbose:
-        print(
-            f"\nFitting RandomForestClassifier "
-            f"(n_estimators={n_estimators}, n_jobs={n_jobs}) …"
-        )
+    print(
+        f"\nFitting RandomForestClassifier "
+        f"(n_estimators={n_estimators}, n_jobs={n_jobs}) …"
+    )
 
     rf = RandomForestClassifier(
         n_estimators=n_estimators,
@@ -116,10 +109,9 @@ def fit_rf_from_ilp(
     )
     rf.fit(X, y)
 
-    if verbose:
-        from sklearn.model_selection import cross_val_score
-        scores = cross_val_score(rf, X, y, cv=min(5, counts.min()), scoring="f1_macro")
-        print(f"  5-fold CV F1 (macro): {scores.mean():.3f} ± {scores.std():.3f}")
+    from sklearn.model_selection import cross_val_score
+    scores = cross_val_score(rf, X, y, cv=min(5, counts.min()), scoring="f1_macro")
+    print(f"  5-fold CV F1 (macro): {scores.mean():.3f} ± {scores.std():.3f}")
 
     return rf
 
@@ -145,7 +137,6 @@ def main():
         n_estimators=args.n_estimators,
         n_jobs=args.n_jobs,
         random_state=args.random_state,
-        verbose=True,
     )
 
     with open(args.output, "wb") as f:

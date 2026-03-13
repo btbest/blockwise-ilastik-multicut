@@ -39,9 +39,9 @@ Lazy blockwise (large volumes, e.g. 20 GB):
         --block-shape 256 256 256 \\
         --halo 32 32 32
 
-Pass --keep-watershed to retain the watershed zarr after the run for
-inspection or reuse.  On a subsequent run pass --ws-zarr with the same
-path to skip recomputation entirely.
+The watershed zarr is kept by default.  Pass --no-keep-watershed to delete
+it after the run.  On a subsequent run pass --ws-zarr with the same path
+to skip recomputation entirely.
 
 Web / remote zarr (requires fsspec and aiohttp):
 
@@ -296,7 +296,7 @@ def _bigintprod(nums) -> int:
 
 def _blockwise_two_pass_watershed(
         input_, block_shape, halo, ws_function=None, n_threads=None,
-        mask=None, verbose=False, output=None, **kwargs
+        mask=None, output=None, **kwargs
 ):
     """Drop-in replacement for elf's blockwise_two_pass_watershed.
 
@@ -348,7 +348,7 @@ def _blockwise_two_pass_watershed(
         list(tqdm(
             tp.map(run_block_one, block_ids_pass_one), total=len(block_ids_pass_one),
             desc="Run pass one of two-pass watershed",
-        )) if verbose else list(tp.map(run_block_one, block_ids_pass_one))
+        ))
 
     def run_block_two(block_id):
         block = blocking.getBlockWithHalo(block_id, list(halo))
@@ -379,7 +379,7 @@ def _blockwise_two_pass_watershed(
         list(tqdm(
             tp.map(run_block_two, block_ids_pass_two), total=len(block_ids_pass_two),
             desc="Run pass two of two-pass watershed",
-        )) if verbose else list(tp.map(run_block_two, block_ids_pass_two))
+        ))
 
     _, max_id, _ = vigra.analysis.relabelConsecutive(output, out=output)
     return output, max_id
@@ -413,7 +413,7 @@ def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None
 
 def _open_or_compute_watershed_zarr(
     ws_zarr_path, boundary_lazy, vol_shape, block_shape, halo,
-    use_2dws, ws_threshold, ws_sigma, n_threads, verbose,
+    use_2dws, ws_threshold, ws_sigma, n_threads,
 ):
     """Return an open zarr array containing the watershed and the node count.
 
@@ -445,33 +445,28 @@ def _open_or_compute_watershed_zarr(
                 and "n_superpixels" in existing.attrs
             ):
                 n_nodes = int(existing.attrs["n_superpixels"])
-                if verbose:
-                    print(
-                        f"Reusing existing watershed zarr: {ws_zarr_path} "
-                        f"({n_nodes} superpixels) — skipping computation"
-                    )
+                print(
+                    f"Reusing existing watershed zarr: {ws_zarr_path} "
+                    f"({n_nodes} superpixels) — skipping computation"
+                )
                 return existing, n_nodes
-            if verbose:
-                print(
-                    f"  Existing {ws_zarr_path!r} has wrong shape or missing "
-                    f"attribute, recomputing …"
-                )
+            print(
+                f"  Existing {ws_zarr_path!r} has wrong shape or missing "
+                f"attribute, recomputing …"
+            )
         except Exception as exc:
-            if verbose:
-                print(
-                    f"  Could not open {ws_zarr_path!r} ({exc}), recomputing …"
-                )
+            print(
+                f"  Could not open {ws_zarr_path!r} ({exc}), recomputing …"
+            )
 
     # --- Compute fresh watershed into a temporary memmap ---
     _memmap_path = str(_Path(ws_zarr_path).parent / "_ws_compute_tmp.dat")
-    if verbose:
-        print(f"Computing blockwise watershed → {ws_zarr_path} …")
+    print(f"Computing blockwise watershed → {ws_zarr_path} …")
     ws_memmap = np.memmap(_memmap_path, dtype="uint64", mode="w+", shape=vol_shape)
 
     try:
         if use_2dws:
-            if verbose:
-                print("  Using stacked 2D watershed (lazy z-slices) …")
+            print("  Using stacked 2D watershed (lazy z-slices) …")
             _, max_id = stacked_watershed(
                 boundary_lazy,
                 threshold=ws_threshold, sigma_seeds=ws_sigma,
@@ -479,7 +474,7 @@ def _open_or_compute_watershed_zarr(
             )
         else:
             ws_block_shape = _ensure_even_block_count(vol_shape, block_shape)
-            if ws_block_shape != block_shape and verbose:
+            if ws_block_shape != block_shape:
                 print(
                     f"  block_shape reduced {block_shape} → {ws_block_shape} "
                     f"(total block count must be even for checkerboard two-pass)"
@@ -493,12 +488,10 @@ def _open_or_compute_watershed_zarr(
                 sigma_seeds=ws_sigma,
                 n_threads=n_threads,
                 output=ws_memmap,
-                verbose=verbose,
             )
 
         n_nodes = int(max_id)  # vigra 1-indexed max = number of superpixels
-        if verbose:
-            print(f"  {n_nodes} superpixels; writing to zarr …")
+        print(f"  {n_nodes} superpixels; writing to zarr …")
 
         # Copy memmap (1-indexed, 1…max_id) → zarr (0-indexed, 0…max_id-1).
         # All pixels are guaranteed ≥ 1 (no mask in the lazy pipeline), so
@@ -519,8 +512,7 @@ def _open_or_compute_watershed_zarr(
             ws_zarr_arr[_bb] = ws_memmap[_bb] - np.uint64(1)
         ws_zarr_arr.attrs["n_superpixels"] = n_nodes
 
-        if verbose:
-            print(f"  Watershed zarr written to {ws_zarr_path}")
+        print(f"  Watershed zarr written to {ws_zarr_path}")
 
     finally:
         del ws_memmap
@@ -622,7 +614,7 @@ def compute_ilastikrag_features(
 def _run_in_memory(
     ilp_path, rf, channel_specs, output_path, output_key,
     beta, block_shape, halo, internal_solver, n_threads,
-    use_2dws, ws_threshold, ws_sigma, verbose,
+    use_2dws, ws_threshold, ws_sigma,
 ):
     import nifty
     from elf.segmentation.features import compute_rag, project_node_labels_to_pixels
@@ -634,16 +626,14 @@ def _run_in_memory(
     channel_data = {}
     for spec in channel_specs:
         ch_name, fpath, fkey = _parse_channel_spec(spec)
-        if verbose:
-            print(f"  Loading {ch_name!r} from {fpath} …")
+        print(f"  Loading {ch_name!r} from {fpath} …")
         channel_data[ch_name] = _load_channel(fpath, fkey)
 
     vol_shape = next(iter(channel_data.values())).shape
     boundary_channel = _find_boundary_channel(feature_names)
     boundary_map = channel_data[boundary_channel].astype(np.float32)
 
-    if verbose:
-        print("Computing watershed …")
+    print("Computing watershed …")
     if use_2dws:
         watershed, _ = stacked_watershed(
             boundary_map, threshold=ws_threshold, sigma_seeds=ws_sigma, n_threads=n_threads,
@@ -654,8 +644,7 @@ def _run_in_memory(
         )
     watershed = watershed.astype(np.uint32)
 
-    if verbose:
-        print("Computing features …")
+    print("Computing features …")
     # Compute features while the watershed still has vigra-convention 1-indexed
     # labels; ilastikrag.Rag treats 0 as background and must see 1-indexed SPs.
     features, edge_ids = compute_ilastikrag_features(watershed, channel_data, feature_names)
@@ -670,38 +659,31 @@ def _run_in_memory(
         edge_ids = edge_ids - 1
 
     n_labels = int(watershed.max()) + 1
-    if verbose:
-        print(f"  {n_labels} superpixels")
+    print(f"  {n_labels} superpixels")
 
-    if verbose:
-        print("Predicting edge probabilities …")
+    print("Predicting edge probabilities …")
     split_col = int(np.argmax(rf.classes_))
     edge_probs = rf.predict_proba(features)[:, split_col].astype(np.float32)
 
     costs = compute_edge_costs(edge_probs, beta=beta)
 
-    if verbose:
-        print("Building graph …")
+    print("Building graph …")
     graph = nifty.graph.undirectedGraph(n_labels)
     graph.insertEdges(edge_ids)
 
-    if verbose:
-        print(f"Running blockwise multicut (block_shape={block_shape}) …")
+    print(f"Running blockwise multicut (block_shape={block_shape}) …")
     node_labels = blockwise_multicut(
         graph, costs, watershed,
         internal_solver=internal_solver,
         block_shape=block_shape, n_threads=n_threads, halo=halo,
     )
 
-    if verbose:
-        print("Projecting labels …")
+    print("Projecting labels …")
     elf_rag = compute_rag(watershed, n_labels=n_labels, n_threads=n_threads)
     segmentation = project_node_labels_to_pixels(elf_rag, node_labels, n_threads=n_threads)
-    if verbose:
-        print(f"  {len(np.unique(segmentation))} final segments")
+    print(f"  {len(np.unique(segmentation))} final segments")
 
-    if verbose:
-        print(f"Saving to {output_path}:{output_key} …")
+    print(f"Saving to {output_path}:{output_key} …")
     with h5py.File(output_path, "a") as f:
         if output_key in f:
             del f[output_key]
@@ -719,7 +701,7 @@ def _run_lazy(
     ilp_path, rf, channel_specs, output_zarr_path, output_zarr_key,
     beta, block_shape, halo, internal_solver, n_threads,
     use_2dws, ws_threshold, ws_sigma, ws_zarr_path,
-    keep_watershed=False, verbose=False,
+    keep_watershed=True,
 ):
     import nifty
     import nifty.tools as nt
@@ -743,8 +725,7 @@ def _run_lazy(
             )
         boundary_lazy = _Float32LazyArray(lazy_arrays[boundary_channel])
         vol_shape = tuple(boundary_lazy.shape)
-        if verbose:
-            print(f"Volume shape: {vol_shape}")
+        print(f"Volume shape: {vol_shape}")
 
         # --- Blockwise watershed: reuse existing zarr or compute fresh ---
         ws_zarr_arr, n_nodes = _open_or_compute_watershed_zarr(
@@ -757,23 +738,29 @@ def _run_lazy(
             ws_threshold=ws_threshold,
             ws_sigma=ws_sigma,
             n_threads=n_threads,
-            verbose=verbose,
         )
         # ws_zarr_arr contains 0-indexed labels (0…n_nodes-1).
         # n_nodes is the number of superpixels = nifty graph node count.
 
-        # --- Blockwise feature computation ---
-        if verbose:
-            print("Computing features blockwise …")
-
-        split_col = int(np.argmax(rf.classes_))
-        global_costs = {}  # {(sp1, sp2) canonical}: float32 cost
-
         blocking = nt.blocking([0, 0, 0], list(vol_shape), list(block_shape))
         n_blocks = blocking.numberOfBlocks
+        print(f"Watershed complete: {n_nodes} superpixels across {n_blocks} blocks.")
+
+        # --- Blockwise feature computation ---
+        # Accumulate edge arrays as numpy per block rather than building a Python
+        # dict of tuple keys.  The dict approach costs ~300 bytes per edge in
+        # Python object overhead; for large volumes (tens of millions of edges)
+        # this easily exhausts RAM.  Numpy arrays use ~20 bytes per edge.
+        print("Computing ilastikrag features blockwise …")
+
+        split_col = int(np.argmax(rf.classes_))
+        all_edges_list = []   # list of (N_i, 2) uint64 arrays (1-indexed, canonical)
+        all_costs_list = []   # list of (N_i,)  float32 arrays
+
         for block_id in range(n_blocks):
-            if verbose and (block_id % max(1, n_blocks // 10) == 0):
-                print(f"  block {block_id}/{n_blocks} …")
+            if block_id % max(1, n_blocks // 10) == 0:
+                pct = 100 * block_id // n_blocks
+                print(f"  block {block_id}/{n_blocks} ({pct}%) …")
 
             block = blocking.getBlockWithHalo(block_id, list(halo))
             outer_bb = tuple(
@@ -789,10 +776,6 @@ def _run_lazy(
                 for name in feature_names
             }
 
-            if ws_block.max() == 0:
-                # empty block (fully masked), skip
-                continue
-
             # Pass 1-indexed ws_block to ilastikrag (vigra treats 0 as background)
             features, edge_ids = compute_ilastikrag_features(
                 ws_block, channel_block, feature_names
@@ -800,32 +783,54 @@ def _run_lazy(
             probs = rf.predict_proba(features)[:, split_col]
             costs = compute_edge_costs(probs.astype(np.float32), beta=beta)
 
-            for (sp1, sp2), cost in zip(edge_ids.tolist(), costs.tolist()):
-                key = (int(min(sp1, sp2)), int(max(sp1, sp2)))
-                global_costs[key] = float(cost)
+            # Canonicalize edge endpoints (sp1 ≤ sp2) and accumulate.
+            all_edges_list.append(np.sort(edge_ids, axis=1))
+            all_costs_list.append(costs.astype(np.float32))
 
-        if verbose:
-            print(f"  Total edges: {len(global_costs)}")
+        if not all_edges_list:
+            raise RuntimeError("No superpixel edges found; all blocks appear to be empty.")
 
-        # --- Re-index edge endpoints to 0-based ---
-        # ilastikrag receives 1-indexed blocks (we add +1 before passing), so
-        # the edge IDs it returns are also 1-indexed.  Subtract 1 to match the
-        # 0-indexed labels stored in ws_zarr_arr.
-        edge_uvs = np.array(list(global_costs.keys()), dtype=np.uint64) - 1
-        edge_costs = np.array(list(global_costs.values()), dtype=np.float32)
-        del global_costs  # free memory
+        n_obs = sum(len(e) for e in all_edges_list)
+        print(f"  {n_obs} edge observations across {n_blocks} blocks; deduplicating …")
+
+        # Concatenate and deduplicate with numpy.
+        # Pack each (sp1, sp2) pair into a single uint64 key, argsort, then keep
+        # the last occurrence of each key (later blocks overwrite earlier ones on
+        # ties, matching the behaviour of the former dict approach).
+        all_edges = np.concatenate(all_edges_list, axis=0)      # (M, 2) uint64
+        all_costs_arr = np.concatenate(all_costs_list, axis=0)  # (M,)   float32
+        del all_edges_list, all_costs_list
+
+        key = all_edges[:, 0] * np.uint64(n_nodes + 1) + all_edges[:, 1]
+        order = np.argsort(key, kind="stable")
+        key           = key[order]
+        all_edges     = all_edges[order]
+        all_costs_arr = all_costs_arr[order]
+        del order
+
+        # True where the key changes = last occurrence of each unique edge.
+        keep = np.empty(len(key), dtype=bool)
+        keep[-1] = True
+        keep[:-1] = key[:-1] != key[1:]
+        del key
+
+        # Shift 1-indexed edge endpoints back to 0-indexed (zarr convention).
+        edge_uvs  = all_edges[keep].astype(np.uint64) - np.uint64(1)
+        edge_costs = all_costs_arr[keep]
+        del all_edges, all_costs_arr, keep
+
+        print(f"  {len(edge_uvs)} unique edges after deduplication.")
 
         # --- Build global nifty graph ---
-        if verbose:
-            print("Building global graph …")
+        print(f"Building global graph ({n_nodes} nodes, {len(edge_uvs)} edges) …")
         graph = nifty.graph.undirectedGraph(n_nodes)
         graph.insertEdges(edge_uvs)
+        del edge_uvs
 
         # --- Blockwise multicut ---
         # ws_zarr_arr supports __getitem__ with slice tuples, which is all
         # blockwise_mc_impl needs (it calls segmentation[bb] per block).
-        if verbose:
-            print(f"Running blockwise multicut (block_shape={block_shape}) …")
+        print(f"Running blockwise multicut (block_shape={block_shape}, solver={internal_solver}) …")
         node_labels = blockwise_multicut(
             graph, edge_costs, ws_zarr_arr,
             internal_solver=internal_solver,
@@ -833,12 +838,12 @@ def _run_lazy(
             n_threads=n_threads,
             halo=halo,
         )
-        if verbose:
-            print(f"  {len(np.unique(node_labels))} unique node labels")
+        del edge_costs
+        n_segments = len(np.unique(node_labels))
+        print(f"Multicut complete: {n_segments} segments from {n_nodes} superpixels.")
 
         # --- Blockwise pixel projection → zarr ---
-        if verbose:
-            print(f"Writing segmentation to {output_zarr_path} …")
+        print(f"Projecting labels and writing segmentation to {output_zarr_path} …")
         seg_out = zarr.open(
             output_zarr_path, mode="w",
             shape=vol_shape, dtype="uint64",
@@ -859,15 +864,13 @@ def _run_lazy(
         try:
             import shutil
             shutil.rmtree(ws_zarr_path)
-            if verbose:
-                print(f"Removed watershed zarr {ws_zarr_path}")
+            print(f"Removed watershed zarr {ws_zarr_path}")
         except Exception as e:
             warnings.warn(f"Could not remove watershed zarr {ws_zarr_path!r}: {e}")
-    elif verbose:
+    else:
         print(f"Watershed zarr kept at {ws_zarr_path}")
 
-    if verbose:
-        print("Done.")
+    print("Done.")
 
 
 # ---------------------------------------------------------------------------
@@ -893,8 +896,7 @@ def run_blockwise_multicut(
     ws_threshold: float = 0.5,
     ws_sigma: float = 2.0,
     ws_zarr_path: str = "watershed.zarr",
-    keep_watershed: bool = False,
-    verbose: bool = True,
+    keep_watershed: bool = True,
 ):
     """
     Full multicut pipeline using an ilastik-trained sklearn RF.
@@ -907,16 +909,14 @@ def run_blockwise_multicut(
         If False (default), load all data into memory (simpler, faster for
         volumes that fit in RAM).
     """
-    if verbose:
-        print(f"Loading classifier from {rf_path} …")
+    print(f"Loading classifier from {rf_path} …")
     with open(rf_path, "rb") as f:
         rf = pickle.load(f)
 
     feature_names = read_feature_names(ilp_path)
-    if verbose:
-        print("Feature names per channel (from .ilp):")
-        for ch, feats in feature_names.items():
-            print(f"  {ch!r}: {feats}")
+    print("Feature names per channel (from .ilp):")
+    for ch, feats in feature_names.items():
+        print(f"  {ch!r}: {feats}")
 
     if lazy:
         if output_zarr_path is None:
@@ -929,7 +929,6 @@ def run_blockwise_multicut(
             internal_solver=internal_solver, n_threads=n_threads,
             use_2dws=use_2dws, ws_threshold=ws_threshold, ws_sigma=ws_sigma,
             ws_zarr_path=ws_zarr_path, keep_watershed=keep_watershed,
-            verbose=verbose,
         )
     else:
         if output_path is None:
@@ -940,7 +939,6 @@ def run_blockwise_multicut(
             beta=beta, block_shape=block_shape, halo=halo,
             internal_solver=internal_solver, n_threads=n_threads,
             use_2dws=use_2dws, ws_threshold=ws_threshold, ws_sigma=ws_sigma,
-            verbose=verbose,
         )
 
 
@@ -987,8 +985,9 @@ def main():
         ),
     )
     parser.add_argument(
-        "--keep-watershed", action="store_true",
-        help="Keep the watershed zarr after the run (default: delete it).",
+        "--keep-watershed", action=argparse.BooleanOptionalAction, default=True,
+        help="Keep the watershed zarr after the run (default: keep). "
+             "Pass --no-keep-watershed to delete it.",
     )
 
     # Multicut / watershed parameters
@@ -1032,7 +1031,6 @@ def main():
         ws_sigma=args.ws_sigma,
         ws_zarr_path=args.ws_zarr,
         keep_watershed=args.keep_watershed,
-        verbose=True,
     )
     return 0
 
