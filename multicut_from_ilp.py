@@ -194,6 +194,33 @@ class _ChannelStore:
 
 
 # ---------------------------------------------------------------------------
+# Boundary channel identification
+# ---------------------------------------------------------------------------
+
+
+def _find_boundary_channel(feature_names: dict) -> str:
+    """
+    Identify the boundary/probability channel from the .ilp FeatureNames dict.
+
+    Looks for a channel whose name contains 'boundary', 'wsdt', 'probabilit',
+    or 'membrane' (case-insensitive).  Falls back to the first channel that
+    does not contain 'raw', then to the first channel overall.
+
+    This is needed because the watershed must run on the boundary probability
+    map, not on raw intensity — and the dict insertion order cannot be relied
+    upon to place the boundary channel first.
+    """
+    for name in feature_names:
+        lower = name.lower()
+        if any(kw in lower for kw in ("boundary", "wsdt", "probabilit", "membrane")):
+            return name
+    for name in feature_names:
+        if "raw" not in name.lower():
+            return name
+    return next(iter(feature_names))
+
+
+# ---------------------------------------------------------------------------
 # Feature computation (ilastikrag)
 # ---------------------------------------------------------------------------
 
@@ -271,7 +298,7 @@ def _run_in_memory(
         channel_data[ch_name] = _load_channel(fpath, fkey)
 
     vol_shape = next(iter(channel_data.values())).shape
-    boundary_channel = next(iter(feature_names))
+    boundary_channel = _find_boundary_channel(feature_names)
     boundary_map = channel_data[boundary_channel].astype(np.float32)
 
     if verbose:
@@ -367,7 +394,7 @@ def _run_lazy(
     # --- Open all channels lazily ---
     with _ChannelStore(channel_specs) as store:
         lazy_arrays = store.arrays
-        boundary_channel = next(iter(feature_names))
+        boundary_channel = _find_boundary_channel(feature_names)
         if boundary_channel not in lazy_arrays:
             raise KeyError(
                 f"Boundary channel {boundary_channel!r} not in provided channels. "

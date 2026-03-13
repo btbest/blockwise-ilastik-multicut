@@ -119,60 +119,71 @@ to the raw voxel data.
 
 ---
 
-## What you need before running inference
+## What you need before running
 
 Three inputs are required:
 
 1. **A trained `.ilp` project file** — created in ilastik's "Boundary-Based
    Segmentation with Multicut" workflow. This contains the training annotations
-   and cached feature vectors used by `fit_classifier.py`.
+   and cached feature vectors used to fit the classifier.
 
-2. **Membrane probability predictions** (and any other channels used during
-   training) — these are **not** computed by this tool. Run ilastik's
-   **Pixel Classification** workflow (or any other boundary detector) on your
-   full volume first, then export the probability maps as HDF5 or zarr.
+2. **Boundary probability predictions** — these are **not** computed by this
+   tool. Run ilastik's **Pixel Classification** workflow (or any other boundary
+   detector) on your full volume first, then export the probability map as HDF5
+   or zarr.  The boundary probabilities must have the same shape as the raw
+   data (zyx axis order, single channel).
 
-3. **The raw data volume** you want to segment — only needed if raw intensity
-   was used as a channel during training (check with `read_feature_names`
-   below).
-
-There is **no separate `--input` flag**. All input volumes — raw data,
-membrane predictions, and any other channels — are provided together through
-`--channels` (see below).
+3. **The raw data volume** — required because raw intensity is used as one of
+   the ilastikrag channels (see feature names below).
 
 ---
 
-## Channel mapping
+## Installation
 
-During training, ilastik assigns each input channel an internal name such as
-`"Membrane Probabilities 0"` or `"Raw Data 0"`. The set of channels and their
-names for your project are stored in the `.ilp`'s `FeatureNames` group. You
-can inspect them before running inference:
+```bash
+# Create and activate the conda environment (installs all dependencies)
+conda env create -f environment.yml
+conda activate blockwise-mc
+
+# Install this package so the ilp-mc-block command is available
+pip install -e .
+```
+
+After `pip install -e .` the `ilp-mc-block` command is on your `PATH`.
+
+---
+
+## Channel names
+
+During training, ilastik assigns each input channel an internal name.  With
+default feature choices the names are exactly:
 
 ```python
 from ilp_reader import read_feature_names
 
-feature_names = read_feature_names("my_project.ilp")
-# → {"Membrane Probabilities 0": ["standard_edge_mean", ...], "Raw Data 0": [...]}
+print(read_feature_names("my_project.ilp"))
+# {
+#   'Raw Data': [
+#       'standard_sp_mean',
+#       'standard_sp_quantiles_10',
+#       'standard_sp_quantiles_90',
+#   ],
+#   'wsdt boundary channel': [
+#       'edgeregion_edge_regionradii_0',
+#       'edgeregion_edge_regionradii_1',
+#       'edgeregion_edge_regionradii_2',
+#       'standard_edge_mean',
+#       'standard_edge_quantiles_10',
+#       'standard_edge_quantiles_90',
+#   ],
+# }
 ```
 
-The `--channels` argument maps each of those internal names to the
-corresponding file on disk:
-
-```
---channels "Membrane Probabilities 0:/path/to/boundary.h5:/data"
-           "Raw Data 0:/path/to/raw.h5:/data"
-```
-
-- The name on the **left** of `:` must exactly match a key returned by
-  `read_feature_names`.
-- The **file path** (and optional HDF5 dataset key) on the right points to the
-  corresponding volume for the new data you want to segment.
-- You must supply **one entry per channel** that appears in `FeatureNames`.
-  Some projects use only membrane probabilities; others also include raw data.
-
-In other words, `--channels` is both the "here is the new volume to segment"
-argument *and* the channel-name mapping — there is no separate input flag.
+`'wsdt boundary channel'` is the boundary probability map used both for the
+watershed (wsdt = watershed distance transform) and for ilastikrag edge
+features.  `ilp-mc-block` identifies these two channels automatically from
+their names and maps them to the files you provide via `--raw` and
+`--probabilities`.
 
 ---
 
@@ -180,14 +191,17 @@ argument *and* the channel-name mapping — there is no separate input flag.
 
 | File | Purpose |
 |------|---------|
+| `ilp_mc_block.py` | **Main entrypoint**: full pipeline in one command (`ilp-mc-block`) |
 | `ilp_reader.py` | Read EdgeFeatures, EdgeLabelsDict, FeatureNames from `.ilp`; multi-lane aware |
 | `fit_classifier.py` | Re-fit a sklearn RF from all training crops; save as pickle |
-| `multicut_from_ilp.py` | CLI: in-memory or lazy blockwise inference using the fitted RF and elf multicut |
+| `multicut_from_ilp.py` | Lower-level CLI: in-memory or lazy blockwise inference using a pre-fitted RF |
 | `multicut_from_ilp.ipynb` | Notebook: same pipeline, step-by-step with inspection utilities |
 
 ---
 
 ## Requirements
+
+See `environment.yml` for the full dependency list.  Key packages:
 
 ```
 conda install -c ilastik-forge ilastikrag vigra
@@ -203,89 +217,117 @@ the `.ilp` file.
 
 ## Usage
 
-### 0. Produce membrane probability predictions (prerequisite)
+### Quick start — `ilp-mc-block`
 
-Before running this tool, use **ilastik's Pixel Classification** workflow (or
-any other boundary detector) to generate membrane probability maps for the
-volume you want to segment. Export the result as HDF5 or zarr. If raw
-intensity was also used as a channel during training, keep that file handy too.
-
-### 1. Inspect the `.ilp` file
-
-Check which channels and ilastikrag features were used during training. The
-channel names shown here are exactly what you will pass to `--channels` in
-steps 3a/3b.
-
-```python
-from ilp_reader import discover_lanes, read_feature_names
-
-# See how many training crops are in the project
-print(discover_lanes("my_project.ilp"))
-# → [0, 1, 2]  (trained on three 256³ crops)
-
-# See which channels you must supply at inference time
-feature_names = read_feature_names("my_project.ilp")
-# → {"Membrane Probabilities 0": ["standard_edge_mean", ...], "Raw Data 0": [...]}
-# You must provide one --channels entry for every key in this dict.
-```
-
-The default feature names if the user makes no custom choices are as found in the example project file:
-
-```
-{
-'Raw Data': [
-    'standard_sp_mean', 
-    'standard_sp_quantiles_10', 
-    'standard_sp_quantiles_90'
-], 
-'wsdt boundary channel': [
-    'edgeregion_edge_regionradii_0', 
-    'edgeregion_edge_regionradii_1', 
-    'edgeregion_edge_regionradii_2', 
-    'standard_edge_mean', 
-    'standard_edge_quantiles_10', 
-    'standard_edge_quantiles_90'
-]
-}
-```
-
-### 2. Re-fit the sklearn classifier (all crops automatically)
+The single command runs the full pipeline: fits the classifier, then runs
+blockwise lazy multicut.  All outputs go to `--output-dir`.
 
 ```bash
-python fit_classifier.py --ilp my_project.ilp --output rf.pkl --n-estimators 100 --n-jobs 8
-# lane defaults to None → reads and concatenates all three crops
+ilp-mc-block \
+    --ilp my_project.ilp \
+    --raw raw.zarr \
+    --probabilities boundary.zarr \
+    --output-dir results/ \
+    --block-shape 256 256 256 \
+    --halo 32 32 32 \
+    --beta 0.5 \
+    --threads 8
 ```
 
-### 3a. Run blockwise multicut — in-memory (volumes that fit in RAM)
+**Output files in `results/`:**
 
-Supply one `--channels` entry per channel from `read_feature_names`, mapping
-each ilastik channel name to the corresponding file for your new volume:
+| File | Contents |
+|------|----------|
+| `raw_segmentation.zarr` | Final segmentation (uint64, zyx), named after `--raw` |
+| `rf.pkl` | Fitted sklearn classifier (reusable) |
+| `params.json` | Exact call parameters for reproducibility |
+
+**Input formats** — both `--raw` and `--probabilities` accept:
+
+```
+/path/to/file.zarr           local zarr store
+/path/to/file.zarr:s0        local zarr store, sub-key 's0'
+/path/to/file.h5:/data       HDF5 file with explicit dataset key
+```
+
+Volumes must be in **zyx axis order** and have the **same shape**.
+
+**All options:**
+
+```
+Required:
+  --ilp PATH            Ilastik .ilp project file
+  --raw PATH[:KEY]      Raw data volume
+  --probabilities PATH[:KEY]
+                        Boundary probability volume
+  --output-dir DIR      Output directory (created if absent)
+
+Blockwise / multicut:
+  --block-shape Z Y X   (default: 256 256 256)
+  --halo Z Y X          (default: 32 32 32)
+  --beta FLOAT          Edge-cost bias; <0.5 merges more, >0.5 splits more
+                        (default: 0.5)
+  --threads INT         Parallel threads (default: 8)
+  --solver              kernighan-lin | greedy-additive | greedy-fixation
+                        (default: kernighan-lin)
+
+Classifier:
+  --n-estimators INT    Number of RF trees (default: 200)
+
+Watershed:
+  --use-2dws            Stacked 2D watersheds (for anisotropic data)
+  --ws-threshold FLOAT  (default: 0.5)
+  --ws-sigma FLOAT      (default: 2.0)
+```
+
+---
+
+### Advanced: run steps separately
+
+For more control, the two steps can be run independently.
+
+#### Step 1 — re-fit the sklearn classifier
+
+```bash
+python fit_classifier.py \
+    --ilp my_project.ilp \
+    --output rf.pkl \
+    --n-estimators 200 \
+    --n-jobs 8
+# lane defaults to None → reads and concatenates all training crops
+```
+
+#### Step 2a — blockwise multicut in-memory (volumes that fit in RAM)
 
 ```bash
 python multicut_from_ilp.py \
     --ilp my_project.ilp \
     --rf rf.pkl \
-    --channels "Membrane Probabilities 0:boundary.h5:/data" \
-               "Raw Data 0:raw.h5:/data" \
+    --channels "wsdt boundary channel:boundary.h5:/data" \
+               "Raw Data:raw.h5:/data" \
     --output segmentation.h5 --output-key /seg \
     --block-shape 256 256 256 --halo 32 32 32 \
     --beta 0.5 --n-threads 8
 ```
 
-### 3b. Run blockwise multicut — lazy mode (large volumes, e.g. 20 GB)
+#### Step 2b — blockwise multicut lazy mode (large volumes, e.g. 20 GB)
 
 ```bash
 python multicut_from_ilp.py \
     --ilp my_project.ilp \
     --rf rf.pkl \
-    --channels "Membrane Probabilities 0:boundary.zarr" \
-               "Raw Data 0:raw.zarr" \
+    --channels "wsdt boundary channel:boundary.zarr" \
+               "Raw Data:raw.zarr" \
     --lazy \
     --ws-tmp /scratch/ws_tmp.dat \
     --output-zarr segmentation.zarr \
     --block-shape 256 256 256 --halo 32 32 32 \
     --beta 0.5 --n-threads 8
 ```
+
+The `--channels` argument maps each ilastik channel name (from `read_feature_names`)
+to the corresponding file.  Channel names must exactly match the keys returned by
+`read_feature_names`.
 
 In lazy mode, disk space of `volume_shape × 8 bytes` is needed for the
 watershed tempfile (`--ws-tmp`). This file is deleted automatically on
