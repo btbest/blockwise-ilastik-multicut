@@ -22,7 +22,7 @@ micromamba create -f environment.yml -y
 micromamba activate blockwise-mc
 ```
 
-`python-elf` (0.7.4) is not on conda-forge; it is pip-installed from `libs/elf@b58e4c83/` by `environment.yml`.
+If `python-elf` (0.7.4) is not on conda-forge; it can be pip-installed from `libs/elf@b58e4c83/`.
 
 ## Tests
 

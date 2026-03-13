@@ -5,8 +5,8 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
-  - python=3.11
-  - numpy>=2
+  - python
+  - numpy>=1
   - ilastikrag>=0.1.4
   - vigra=1.12.1
   - nifty
@@ -22,7 +22,5 @@ dependencies:
   - numba
   - pytest
   - pip
-  - pip:
-    # python-elf on conda-forge tops out at 0.4.7; the local snapshot
-    # (libs/elf@<hash>/) is 0.7.4 and is the intended version.
-    - --no-deps ./libs/elf@b58e4c83
+  - python-elf
+  - requests

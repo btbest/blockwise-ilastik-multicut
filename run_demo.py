@@ -85,7 +85,7 @@ def run_multicut(ilp: Path, rf_path: Path, vol_paths: dict, out_dir: Path) -> Pa
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out-dir", default="/tmp/blockwise_mc_demo")
+    parser.add_argument("--out-dir", default="./tmp/blockwise_mc_demo")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
