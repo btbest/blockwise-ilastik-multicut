@@ -34,10 +34,14 @@ Lazy blockwise (large volumes, e.g. 20 GB):
         --channels "Membrane Probabilities 0:/path/to/boundary.zarr" \\
                    "Raw Data 0:/path/to/raw.zarr" \\
         --lazy \\
-        --ws-tmp /scratch/ws_tmp.dat \\
+        --ws-zarr /scratch/watershed.zarr \\
         --output-zarr segmentation.zarr \\
         --block-shape 256 256 256 \\
         --halo 32 32 32
+
+Pass --keep-watershed to retain the watershed zarr after the run for
+inspection or reuse.  On a subsequent run pass --ws-zarr with the same
+path to skip recomputation entirely.
 
 Web / remote zarr (requires fsspec and aiohttp):
 
@@ -47,7 +51,7 @@ Web / remote zarr (requires fsspec and aiohttp):
         --channels "Membrane Probabilities 0:https://webknossos.org/.../boundary.zarr/s0" \\
                    "Raw Data 0:https://webknossos.org/.../raw.zarr/s0" \\
         --lazy \\
-        --ws-tmp /scratch/ws_tmp.dat \\
+        --ws-zarr /scratch/watershed.zarr \\
         --output-zarr segmentation.zarr \\
         --block-shape 256 256 256 \\
         --halo 32 32 32
@@ -403,6 +407,134 @@ def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None
 
 
 # ---------------------------------------------------------------------------
+# Watershed zarr: open existing or compute fresh
+# ---------------------------------------------------------------------------
+
+
+def _open_or_compute_watershed_zarr(
+    ws_zarr_path, boundary_lazy, vol_shape, block_shape, halo,
+    use_2dws, ws_threshold, ws_sigma, n_threads, verbose,
+):
+    """Return an open zarr array containing the watershed and the node count.
+
+    The zarr stores **0-indexed** superpixel labels (0 … n_superpixels-1).
+    The zarr attribute ``"n_superpixels"`` holds the total superpixel count
+    (= the number of nifty graph nodes).
+
+    If a zarr already exists at *ws_zarr_path* with the correct shape and the
+    ``"n_superpixels"`` attribute, it is opened read-only and returned
+    immediately — the watershed computation is skipped entirely.  This lets
+    callers reuse a watershed from a previous run for faster debugging.
+
+    When computing fresh the watershed is first written into a temporary
+    numpy memmap (required by elf / vigra), then copied block-by-block into
+    a zarr with labels shifted to 0-indexed.  The memmap is deleted
+    immediately after the copy.
+    """
+    import zarr
+    import nifty.tools as nt
+    from elf.segmentation.watershed import stacked_watershed
+    from pathlib import Path as _Path
+
+    # --- Try to reuse an existing watershed zarr ---
+    if os.path.exists(ws_zarr_path):
+        try:
+            existing = zarr.open(ws_zarr_path, mode="r")
+            if (
+                tuple(existing.shape) == tuple(vol_shape)
+                and "n_superpixels" in existing.attrs
+            ):
+                n_nodes = int(existing.attrs["n_superpixels"])
+                if verbose:
+                    print(
+                        f"Reusing existing watershed zarr: {ws_zarr_path} "
+                        f"({n_nodes} superpixels) — skipping computation"
+                    )
+                return existing, n_nodes
+            if verbose:
+                print(
+                    f"  Existing {ws_zarr_path!r} has wrong shape or missing "
+                    f"attribute, recomputing …"
+                )
+        except Exception as exc:
+            if verbose:
+                print(
+                    f"  Could not open {ws_zarr_path!r} ({exc}), recomputing …"
+                )
+
+    # --- Compute fresh watershed into a temporary memmap ---
+    _memmap_path = str(_Path(ws_zarr_path).parent / "_ws_compute_tmp.dat")
+    if verbose:
+        print(f"Computing blockwise watershed → {ws_zarr_path} …")
+    ws_memmap = np.memmap(_memmap_path, dtype="uint64", mode="w+", shape=vol_shape)
+
+    try:
+        if use_2dws:
+            if verbose:
+                print("  Using stacked 2D watershed (lazy z-slices) …")
+            _, max_id = stacked_watershed(
+                boundary_lazy,
+                threshold=ws_threshold, sigma_seeds=ws_sigma,
+                n_threads=n_threads, output=ws_memmap,
+            )
+        else:
+            ws_block_shape = _ensure_even_block_count(vol_shape, block_shape)
+            if ws_block_shape != block_shape and verbose:
+                print(
+                    f"  block_shape reduced {block_shape} → {ws_block_shape} "
+                    f"(total block count must be even for checkerboard two-pass)"
+                )
+            _, max_id = _blockwise_two_pass_watershed(
+                boundary_lazy,
+                block_shape=ws_block_shape,
+                halo=halo,
+                ws_function=_safe_distance_transform_watershed,
+                threshold=ws_threshold,
+                sigma_seeds=ws_sigma,
+                n_threads=n_threads,
+                output=ws_memmap,
+                verbose=verbose,
+            )
+
+        n_nodes = int(max_id)  # vigra 1-indexed max = number of superpixels
+        if verbose:
+            print(f"  {n_nodes} superpixels; writing to zarr …")
+
+        # Copy memmap (1-indexed, 1…max_id) → zarr (0-indexed, 0…max_id-1).
+        # All pixels are guaranteed ≥ 1 (no mask in the lazy pipeline), so
+        # the uint64 subtraction never wraps around.
+        ws_zarr_arr = zarr.open(
+            ws_zarr_path, mode="w",
+            shape=vol_shape, dtype="uint64",
+            chunks=block_shape,
+        )
+        _copy_blocking = nt.blocking(
+            [0] * len(vol_shape), list(vol_shape), list(block_shape)
+        )
+        for _bid in range(_copy_blocking.numberOfBlocks):
+            _blk = _copy_blocking.getBlock(_bid)
+            _bb = tuple(
+                slice(s, e) for s, e in zip(_blk.begin, _blk.end)
+            )
+            ws_zarr_arr[_bb] = ws_memmap[_bb] - np.uint64(1)
+        ws_zarr_arr.attrs["n_superpixels"] = n_nodes
+
+        if verbose:
+            print(f"  Watershed zarr written to {ws_zarr_path}")
+
+    finally:
+        del ws_memmap
+        try:
+            os.remove(_memmap_path)
+        except Exception as _e:
+            warnings.warn(
+                f"Could not remove watershed temp file {_memmap_path!r}: {_e}"
+            )
+
+    return ws_zarr_arr, n_nodes
+
+
+# ---------------------------------------------------------------------------
 # Boundary channel identification
 # ---------------------------------------------------------------------------
 
@@ -586,12 +718,12 @@ def _run_in_memory(
 def _run_lazy(
     ilp_path, rf, channel_specs, output_zarr_path, output_zarr_key,
     beta, block_shape, halo, internal_solver, n_threads,
-    use_2dws, ws_threshold, ws_sigma, ws_tmp_path, verbose,
+    use_2dws, ws_threshold, ws_sigma, ws_zarr_path,
+    keep_watershed=False, verbose=False,
 ):
     import nifty
     import nifty.tools as nt
     from elf.segmentation.multicut import blockwise_multicut, compute_edge_costs
-    from elf.segmentation.watershed import stacked_watershed
 
     try:
         import zarr
@@ -614,43 +746,21 @@ def _run_lazy(
         if verbose:
             print(f"Volume shape: {vol_shape}")
 
-        # --- Blockwise watershed → numpy memmap ---
-        if verbose:
-            print(f"Computing blockwise watershed → {ws_tmp_path} …")
-        ws_memmap = np.memmap(ws_tmp_path, dtype="uint64", mode="w+", shape=vol_shape)
-
-        if use_2dws:
-            # stacked_watershed operates slice-by-slice; supports pre-allocated output
-            # For large z, still needs full input array — use lazy slicing
-            if verbose:
-                print("  Using stacked 2D watershed (lazy z-slices) …")
-            _, max_id = stacked_watershed(
-                boundary_lazy,
-                threshold=ws_threshold, sigma_seeds=ws_sigma,
-                n_threads=n_threads, output=ws_memmap,
-            )
-        else:
-            ws_block_shape = _ensure_even_block_count(vol_shape, block_shape)
-            if ws_block_shape != block_shape and verbose:
-                print(
-                    f"  block_shape reduced {block_shape} → {ws_block_shape} "
-                    f"(total block count must be even for checkerboard two-pass)"
-                )
-            _, max_id = _blockwise_two_pass_watershed(
-                boundary_lazy,
-                block_shape=ws_block_shape,
-                halo=halo,
-                ws_function=_safe_distance_transform_watershed,
-                threshold=ws_threshold,
-                sigma_seeds=ws_sigma,
-                n_threads=n_threads,
-                output=ws_memmap,
-                verbose=verbose,
-            )
-        # max_id is the 1-indexed maximum label from the vigra-based watershed.
-        # We will shift to 0-indexed after feature computation (see below).
-        if verbose:
-            print(f"  {max_id} superpixels (max id = {max_id})")
+        # --- Blockwise watershed: reuse existing zarr or compute fresh ---
+        ws_zarr_arr, n_nodes = _open_or_compute_watershed_zarr(
+            ws_zarr_path=ws_zarr_path,
+            boundary_lazy=boundary_lazy,
+            vol_shape=vol_shape,
+            block_shape=block_shape,
+            halo=halo,
+            use_2dws=use_2dws,
+            ws_threshold=ws_threshold,
+            ws_sigma=ws_sigma,
+            n_threads=n_threads,
+            verbose=verbose,
+        )
+        # ws_zarr_arr contains 0-indexed labels (0…n_nodes-1).
+        # n_nodes is the number of superpixels = nifty graph node count.
 
         # --- Blockwise feature computation ---
         if verbose:
@@ -671,7 +781,9 @@ def _run_lazy(
                 for s, e in zip(block.outerBlock.begin, block.outerBlock.end)
             )
 
-            ws_block = np.array(ws_memmap[outer_bb])  # copy into RAM
+            # Read 0-indexed zarr block and convert to 1-indexed for ilastikrag
+            # (vigra treats 0 as background; our zarr uses 0 as first superpixel).
+            ws_block = np.array(ws_zarr_arr[outer_bb]) + np.uint64(1)
             channel_block = {
                 name: np.array(lazy_arrays[name][outer_bb])
                 for name in feature_names
@@ -695,18 +807,13 @@ def _run_lazy(
         if verbose:
             print(f"  Total edges: {len(global_costs)}")
 
-        # --- Re-index to 0-based ---
-        # vigra/elf watershed is 1-indexed (labels 1..max_id).  Keeping the phantom
-        # node 0 in the nifty graph causes an isolated node that triggers an
-        # off-by-one in blockwise_mc_impl (conda-forge python-elf 0.7.4).
-        # Subtract 1 from every edge endpoint and from the memmap in-place.
+        # --- Re-index edge endpoints to 0-based ---
+        # ilastikrag receives 1-indexed blocks (we add +1 before passing), so
+        # the edge IDs it returns are also 1-indexed.  Subtract 1 to match the
+        # 0-indexed labels stored in ws_zarr_arr.
         edge_uvs = np.array(list(global_costs.keys()), dtype=np.uint64) - 1
         edge_costs = np.array(list(global_costs.values()), dtype=np.float32)
         del global_costs  # free memory
-
-        # Shift the memmap in-place (uint64; safe when all values > 0)
-        ws_memmap -= 1
-        n_nodes = int(max_id)  # 0-indexed max = max_id-1, so n_nodes = max_id
 
         # --- Build global nifty graph ---
         if verbose:
@@ -715,12 +822,12 @@ def _run_lazy(
         graph.insertEdges(edge_uvs)
 
         # --- Blockwise multicut ---
-        # ws_memmap is a numpy.memmap (numpy subclass); blockwise_mc_impl
-        # accesses it via segmentation[bb] slicing which works fine.
+        # ws_zarr_arr supports __getitem__ with slice tuples, which is all
+        # blockwise_mc_impl needs (it calls segmentation[bb] per block).
         if verbose:
             print(f"Running blockwise multicut (block_shape={block_shape}) …")
         node_labels = blockwise_multicut(
-            graph, edge_costs, ws_memmap,
+            graph, edge_costs, ws_zarr_arr,
             internal_solver=internal_solver,
             block_shape=block_shape,
             n_threads=n_threads,
@@ -742,18 +849,22 @@ def _run_lazy(
             inner_bb = tuple(
                 slice(s, e) for s, e in zip(block.begin, block.end)
             )
-            ws_block = np.array(ws_memmap[inner_bb])
+            # ws_zarr_arr is 0-indexed; index directly into node_labels.
+            ws_block = np.array(ws_zarr_arr[inner_bb])
             seg_block = node_labels[ws_block]
             seg_out[inner_bb] = seg_block
 
-    # --- Clean up memmap tempfile ---
-    try:
-        del ws_memmap
-        os.remove(ws_tmp_path)
-        if verbose:
-            print(f"Removed tempfile {ws_tmp_path}")
-    except Exception as e:
-        warnings.warn(f"Could not remove tempfile {ws_tmp_path}: {e}")
+    # --- Keep or remove the watershed zarr ---
+    if not keep_watershed:
+        try:
+            import shutil
+            shutil.rmtree(ws_zarr_path)
+            if verbose:
+                print(f"Removed watershed zarr {ws_zarr_path}")
+        except Exception as e:
+            warnings.warn(f"Could not remove watershed zarr {ws_zarr_path!r}: {e}")
+    elif verbose:
+        print(f"Watershed zarr kept at {ws_zarr_path}")
 
     if verbose:
         print("Done.")
@@ -781,7 +892,8 @@ def run_blockwise_multicut(
     use_2dws: bool = False,
     ws_threshold: float = 0.5,
     ws_sigma: float = 2.0,
-    ws_tmp_path: str = "ws_tmp.dat",
+    ws_zarr_path: str = "watershed.zarr",
+    keep_watershed: bool = False,
     verbose: bool = True,
 ):
     """
@@ -816,7 +928,8 @@ def run_blockwise_multicut(
             beta=beta, block_shape=block_shape, halo=halo,
             internal_solver=internal_solver, n_threads=n_threads,
             use_2dws=use_2dws, ws_threshold=ws_threshold, ws_sigma=ws_sigma,
-            ws_tmp_path=ws_tmp_path, verbose=verbose,
+            ws_zarr_path=ws_zarr_path, keep_watershed=keep_watershed,
+            verbose=verbose,
         )
     else:
         if output_path is None:
@@ -866,8 +979,16 @@ def main():
         help="Enable lazy blockwise mode for large (>RAM) volumes.",
     )
     parser.add_argument(
-        "--ws-tmp", default="ws_tmp.dat",
-        help="Path for the watershed memmap tempfile (lazy mode, default: ws_tmp.dat)",
+        "--ws-zarr", default="watershed.zarr",
+        help=(
+            "Path for the watershed zarr (lazy mode, default: watershed.zarr). "
+            "If the zarr already exists with the correct shape it is reused and "
+            "the watershed step is skipped entirely."
+        ),
+    )
+    parser.add_argument(
+        "--keep-watershed", action="store_true",
+        help="Keep the watershed zarr after the run (default: delete it).",
     )
 
     # Multicut / watershed parameters
@@ -909,7 +1030,8 @@ def main():
         use_2dws=args.use_2dws,
         ws_threshold=args.ws_threshold,
         ws_sigma=args.ws_sigma,
-        ws_tmp_path=args.ws_tmp,
+        ws_zarr_path=args.ws_zarr,
+        keep_watershed=args.keep_watershed,
         verbose=True,
     )
     return 0
