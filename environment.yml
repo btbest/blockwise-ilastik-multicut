@@ -22,5 +22,8 @@ dependencies:
   - numba
   - pytest
   - pip
-  - python-elf
+  # claude: use pip-override below. user: remove pip section and include python-elf from conda instead
+  # - python-elf
   - requests
+  - pip:
+    - ./libs/elf@b58e4c83

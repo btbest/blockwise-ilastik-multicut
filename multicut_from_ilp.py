@@ -137,7 +137,17 @@ def _open_channel_lazy(path: str, key: str | None):
                     "Install it with: pip install fsspec aiohttp"
                 ) from exc
             mapper = fsspec.get_mapper(path)
-            store = zarr.open(mapper, mode="r")
+            try:
+                store = zarr.open(mapper, mode="r")
+            except Exception:
+                # zarr ≥3 probes zarr.json first (v3 format); the remote array
+                # may be zarr v2 which stores metadata in .zarray instead.
+                # Retry with an explicit v2 format request.
+                zarr_major = int(zarr.__version__.split(".")[0])
+                if zarr_major >= 3:
+                    store = zarr.open(mapper, mode="r", zarr_format=2)
+                else:
+                    store = zarr.open(mapper, mode="r", zarr_version=2)
         else:
             store = zarr.open(path, mode="r")
 
@@ -275,13 +285,25 @@ def _run_in_memory(
             boundary_map, threshold=ws_threshold, sigma_seeds=ws_sigma,
         )
     watershed = watershed.astype(np.uint32)
-    n_labels = int(watershed.max()) + 1
-    if verbose:
-        print(f"  {n_labels} superpixels")
 
     if verbose:
         print("Computing features …")
+    # Compute features while the watershed still has vigra-convention 1-indexed
+    # labels; ilastikrag.Rag treats 0 as background and must see 1-indexed SPs.
     features, edge_ids = compute_ilastikrag_features(watershed, channel_data, feature_names)
+
+    # Re-index watershed and edge_ids to 0-based.
+    # vigra / elf watershed is 1-indexed (labels 1..N, 0 never used without a mask).
+    # Keeping the phantom node 0 in the nifty graph causes an isolated node that
+    # triggers an off-by-one in blockwise_mc_impl when it sizes the reduced graph
+    # from edge endpoints only (conda-forge python-elf 0.7.4).
+    if watershed.min() > 0:
+        watershed = watershed - 1
+        edge_ids = edge_ids - 1
+
+    n_labels = int(watershed.max()) + 1
+    if verbose:
+        print(f"  {n_labels} superpixels")
 
     if verbose:
         print("Predicting edge probabilities …")
@@ -382,9 +404,10 @@ def _run_lazy(
                 output=ws_memmap,
                 verbose=verbose,
             )
-        n_nodes = max_id + 1
+        # max_id is the 1-indexed maximum label from the vigra-based watershed.
+        # We will shift to 0-indexed after feature computation (see below).
         if verbose:
-            print(f"  {n_nodes} superpixels (max id = {max_id})")
+            print(f"  {max_id} superpixels (max id = {max_id})")
 
         # --- Blockwise feature computation ---
         if verbose:
@@ -415,6 +438,7 @@ def _run_lazy(
                 # empty block (fully masked), skip
                 continue
 
+            # Pass 1-indexed ws_block to ilastikrag (vigra treats 0 as background)
             features, edge_ids = compute_ilastikrag_features(
                 ws_block, channel_block, feature_names
             )
@@ -428,13 +452,22 @@ def _run_lazy(
         if verbose:
             print(f"  Total edges: {len(global_costs)}")
 
-        # --- Build global nifty graph ---
-        if verbose:
-            print("Building global graph …")
-        edge_uvs = np.array(list(global_costs.keys()), dtype=np.uint64)
+        # --- Re-index to 0-based ---
+        # vigra/elf watershed is 1-indexed (labels 1..max_id).  Keeping the phantom
+        # node 0 in the nifty graph causes an isolated node that triggers an
+        # off-by-one in blockwise_mc_impl (conda-forge python-elf 0.7.4).
+        # Subtract 1 from every edge endpoint and from the memmap in-place.
+        edge_uvs = np.array(list(global_costs.keys()), dtype=np.uint64) - 1
         edge_costs = np.array(list(global_costs.values()), dtype=np.float32)
         del global_costs  # free memory
 
+        # Shift the memmap in-place (uint64; safe when all values > 0)
+        ws_memmap -= 1
+        n_nodes = int(max_id)  # 0-indexed max = max_id-1, so n_nodes = max_id
+
+        # --- Build global nifty graph ---
+        if verbose:
+            print("Building global graph …")
         graph = nifty.graph.undirectedGraph(n_nodes)
         graph.insertEdges(edge_uvs)
 
