@@ -1,5 +1,7 @@
 import multiprocessing
 from concurrent import futures
+from functools import reduce
+from operator import mul
 from typing import List, Optional, Tuple
 
 import nifty.tools as nt
@@ -242,6 +244,18 @@ def stacked_watershed(
     return output, max_id
 
 
+def _bigintprod(nums) -> int:
+    """Product of an iterable using pure-Python integers.
+
+    numpy.prod(nifty_block_shape, dtype=uint64) silently returns float64 on
+    Windows when nifty exposes block-shape elements as 32-bit C integers:
+    once the accumulated product exceeds INT32_MAX (~2.1 B) numpy promotes the
+    accumulator to float64, ignoring the requested dtype.  Using Python's
+    arbitrary-precision integers avoids the issue entirely.
+    """
+    return reduce(mul, map(int, nums), 1)
+
+
 def blockwise_two_pass_watershed(
     input_: np.ndarray,
     block_shape: Tuple[int, ...],
@@ -296,7 +310,10 @@ def blockwise_two_pass_watershed(
 
         # use the lowest pixel id in this block as offset
         # in order to guarantee that superpixel ids are unique
-        offset = block_id * np.prod(blocking.blockShape, dtype=ws.dtype)
+        # Use _bigintprod instead of np.prod: on Windows, nifty exposes blockShape
+        # as 32-bit integers; np.prod overflows INT32_MAX and silently returns
+        # float64, causing a UFuncOutputCastingError on the ws += offset line.
+        offset = np.uint64(_bigintprod([block_id] + list(blocking.blockShape)))
         if mask_block is None:
             ws += offset
         else:
@@ -331,7 +348,7 @@ def blockwise_two_pass_watershed(
         )
         ws = ws[local_bb]
 
-        offset = block_id * np.prod(blocking.blockShape)
+        offset = _bigintprod([block_id] + list(blocking.blockShape))
         # map ids corresponding to seeds back to the seed ids
         id_mapping = {v: k for k, v in seed_id_mapping.items()}
         assert 0 in id_mapping
