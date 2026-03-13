@@ -237,6 +237,23 @@ class _ChannelStore:
                 pass
 
 
+class _Float32LazyArray:
+    """Thin wrapper that casts sliced blocks to float32.
+
+    vigra.analysis.watershedsNew only supports uint8 and float32.  H5py
+    datasets and zarr arrays stored as float64 (or any other type) must be
+    cast before being handed to elf / vigra.
+    """
+
+    def __init__(self, arr):
+        self._arr = arr
+        self.shape = arr.shape
+        self.dtype = np.dtype("float32")
+
+    def __getitem__(self, key):
+        return np.asarray(self._arr[key], dtype=np.float32)
+
+
 # ---------------------------------------------------------------------------
 # Boundary channel identification
 # ---------------------------------------------------------------------------
@@ -444,7 +461,7 @@ def _run_lazy(
                 f"Boundary channel {boundary_channel!r} not in provided channels. "
                 f"Available: {list(lazy_arrays)}"
             )
-        boundary_lazy = lazy_arrays[boundary_channel]
+        boundary_lazy = _Float32LazyArray(lazy_arrays[boundary_channel])
         vol_shape = tuple(boundary_lazy.shape)
         if verbose:
             print(f"Volume shape: {vol_shape}")
