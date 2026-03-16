@@ -162,11 +162,15 @@ def read_wsdt_params(ilp_path: str) -> dict:
     Returns
     -------
     dict with keys:
-        threshold (float)  – boundary probability threshold (default 0.5)
-        min_size  (int)    – minimum superpixel size in pixels (default 100)
-        sigma     (float)  – smoothing applied to both seed and weight maps (default 3.0)
-        alpha     (float)  – blend factor between boundary data and distance
-                             transform (default 0.9)
+        threshold   (float)       – boundary probability threshold (default 0.5)
+        min_size    (int)         – minimum superpixel size in pixels (default 100)
+        sigma       (float)       – smoothing applied to both seed and weight maps (default 3.0)
+        alpha       (float)       – blend factor between boundary data and distance
+                                    transform (default 0.9)
+        pixel_pitch (list | None) – anisotropy factors [z, y, x]; None = isotropic
+        blockwise   (bool)        – True when ilastik ran its blockwise (128³, halo=10)
+                                    watershed; False for very old projects that ran on
+                                    the full crop at once
 
     If the ``DT Watershed`` group is absent (e.g. very old project files) or
     any individual key is missing, the ilastik defaults are returned for that
@@ -178,7 +182,14 @@ def read_wsdt_params(ilp_path: str) -> dict:
     therefore cannot be read from the file.  Pass it explicitly via the
     ``--ws-invert`` CLI flag when needed.
     """
-    defaults = {"threshold": 0.5, "min_size": 100, "sigma": 3.0, "alpha": 0.9}
+    defaults = {
+        "threshold": 0.5,
+        "min_size":  100,
+        "sigma":     3.0,
+        "alpha":     0.9,
+        "pixel_pitch": None,  # None → isotropic (no anisotropy correction)
+        "blockwise": True,    # False only for very old projects (pre-v0.2 serialiser)
+    }
     try:
         with h5py.File(ilp_path, "r") as f:
             if WSDT_GROUP not in f:
@@ -186,9 +197,27 @@ def read_wsdt_params(ilp_path: str) -> dict:
             g = f[WSDT_GROUP]
             result = {}
             result["threshold"] = float(g["Threshold"][()]) if "Threshold" in g else defaults["threshold"]
-            result["min_size"]  = int(g["MinSize"][()])    if "MinSize"   in g else defaults["min_size"]
-            result["sigma"]     = float(g["Sigma"][()])    if "Sigma"     in g else defaults["sigma"]
-            result["alpha"]     = float(g["Alpha"][()])    if "Alpha"     in g else defaults["alpha"]
+            result["min_size"]  = int(g["MinSize"][()])     if "MinSize"   in g else defaults["min_size"]
+            result["sigma"]     = float(g["Sigma"][()])     if "Sigma"     in g else defaults["sigma"]
+            result["alpha"]     = float(g["Alpha"][()])     if "Alpha"     in g else defaults["alpha"]
+
+            # PixelPitch is stored as a list; [] means isotropic → pass None to elf.
+            if "PixelPitch" in g:
+                raw = g["PixelPitch"][()]
+                if hasattr(raw, "tolist"):
+                    raw = raw.tolist()
+                result["pixel_pitch"] = raw if raw else None
+            else:
+                result["pixel_pitch"] = defaults["pixel_pitch"]
+
+            # BlockwiseWatershed is absent in v0.1 projects; SerialDefaultSlot
+            # sets it to False in that case, meaning ilastik ran the watershed
+            # on the full crop (not blockwise).
+            if "BlockwiseWatershed" in g:
+                result["blockwise"] = bool(g["BlockwiseWatershed"][()])
+            else:
+                result["blockwise"] = False  # old project, no key → ilastik default was False
+
             return result
     except Exception:
         return dict(defaults)
