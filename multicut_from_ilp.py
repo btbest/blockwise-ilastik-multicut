@@ -206,6 +206,26 @@ class _Float32LazyArray:
         return data
 
 
+class _InvertedLazyArray:
+    """Lazy wrapper that returns ``1 - block`` on every slice read.
+
+    Used when ``InvertPixelProbabilities`` is active: the boundary map is
+    stored as high-value = membrane, but elf's distance transform watershed
+    expects high-value = interior (i.e. the complement).  Only the watershed
+    input is inverted; the raw boundary values used for edge-feature
+    computation are left unchanged.
+    """
+
+    def __init__(self, arr):
+        self._arr = arr
+        self.shape = arr.shape
+        self.dtype = arr.dtype
+        self.ndim  = arr.ndim
+
+    def __getitem__(self, key):
+        return np.float32(1.0) - self._arr[key]
+
+
 def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None, **kwargs):
     """Wraps elf's distance_transform_watershed, handling flat / empty blocks.
 
@@ -425,13 +445,140 @@ def _relabel_and_write_zarr(ws_memmap, ws_zarr_arr, vol_shape, block_shape, n_th
 
 
 # ---------------------------------------------------------------------------
+# Ilastik-style parallel watershed  (mirrors ilastik's parallel_watershed)
+# ---------------------------------------------------------------------------
+
+
+def _ilastik_parallel_watershed(
+    boundary_lazy, vol_shape,
+    ws_threshold, ws_sigma, ws_min_size, ws_alpha,
+    ws_pixel_pitch, ws_apply_nonmax,
+    n_threads, output,
+):
+    """Blockwise watershed that exactly replicates ilastik's parallel_watershed.
+
+    ilastik's ``OpWsdt.execute`` calls ``parallel_watershed`` on the full
+    (in-RAM) boundary crop with ``block_shape=None`` and ``halo=None``, which
+    resolve to 128³ voxels and 10-voxel halo respectively for 3-D data.
+    The key property is **hard block boundaries**: every block is processed
+    independently with no cross-block seed propagation.
+
+    Because we use the same :func:`nifty.tools.blocking` call and identical
+    per-block steps — ``elf.distance_transform_watershed`` followed by
+    ``vigra.analysis.labelMultiArray`` — the superpixel boundaries produced
+    here are pixel-identical to ilastik's, provided the same parameters are
+    used.  The only known exception is very old projects where
+    ``BlockwiseWatershed=False`` (ilastik ran on the full crop at once;
+    we cannot replicate that for volumes that don't fit in RAM).
+
+    Parameters
+    ----------
+    boundary_lazy : array-like supporting ``__getitem__`` with slice tuples
+    vol_shape     : tuple[int, ...]   – (Z, Y, X) spatial shape
+    ws_threshold  : float
+    ws_sigma      : float             – applied to both seed map and weight map
+    ws_min_size   : int
+    ws_alpha      : float
+    ws_pixel_pitch: list[float] | None
+    ws_apply_nonmax : bool
+    n_threads     : int
+    output        : np.memmap         – pre-allocated uint64 memmap (same shape)
+
+    Returns
+    -------
+    (output, max_id) : the filled memmap and the maximum label value
+    """
+    import nifty.tools as nt
+    import vigra
+    from concurrent import futures
+    from tqdm import tqdm
+    from elf.segmentation.watershed import distance_transform_watershed
+
+    ndim = len(vol_shape)
+    # These are ilastik's hard-coded defaults for 3-D data (block_shape=None,
+    # halo=None paths in parallel_watershed / get_blocking).
+    BLOCK_SHAPE = (128,) * ndim
+    HALO        = [10]  * ndim
+
+    blocking = nt.blocking([0] * ndim, list(vol_shape), list(BLOCK_SHAPE))
+    n_blocks  = blocking.numberOfBlocks
+    per_block_max = np.zeros(n_blocks, dtype=np.int64)
+
+    def _run_block(block_id):
+        block      = blocking.getBlockWithHalo(block_id, HALO)
+        outer_bb   = tuple(slice(s, e) for s, e in zip(block.outerBlock.begin,      block.outerBlock.end))
+        local_bb   = tuple(slice(s, e) for s, e in zip(block.innerBlockLocal.begin, block.innerBlockLocal.end))
+        inner_bb   = tuple(slice(s, e) for s, e in zip(block.innerBlock.begin,      block.innerBlock.end))
+
+        data_block = np.asarray(boundary_lazy[outer_bb], dtype=np.float32)
+
+        # Guard against empty / flat blocks to avoid NaN in elf's dt / dt.max().
+        if not (data_block > ws_threshold).any():
+            inner_shape = tuple(e - s for s, e in zip(block.innerBlock.begin, block.innerBlock.end))
+            output[inner_bb] = np.zeros(inner_shape, dtype=np.uint64)
+            return 0
+
+        ws_outer, _ = distance_transform_watershed(
+            data_block,
+            ws_threshold,
+            ws_sigma,         # sigma_seeds
+            ws_sigma,         # sigma_weights  (ilastik passes Sigma for both)
+            ws_min_size,
+            ws_alpha,
+            ws_pixel_pitch,
+            ws_apply_nonmax,
+        )
+        ws_outer = ws_outer.astype("uint32")
+        # Same as ilastik: relabel the inner sub-block with vigra.labelMultiArray
+        # so that labels are consecutive and disconnected fragments are separated.
+        ws_inner = vigra.analysis.labelMultiArray(ws_outer[local_bb])
+        # Write 0-indexed: labelMultiArray gives 1..max_inner, subtract 1 so
+        # block 0 occupies labels 0..max_0-1, block 1 will occupy max_0..max_0+max_1-1
+        # after the offset phase, etc.  This means the zarr is ready to use
+        # without any further relabeling step.
+        output[inner_bb] = ws_inner.astype(np.uint64) - np.uint64(1)
+        return int(ws_inner.max())
+
+    print(f"  (ilastik-style: {BLOCK_SHAPE} blocks, halo={HALO[0]})")
+    with futures.ThreadPoolExecutor(n_threads) as tp:
+        per_block_max[:] = list(tqdm(
+            tp.map(_run_block, range(n_blocks)),
+            total=n_blocks, desc="  Watershed blocks",
+        ))
+
+    # Apply cumulative offsets — same arithmetic as parallel_watershed, but
+    # our labels are already 0-indexed (0..max_k-1 per block) so the maths
+    # still works out: block k>0 adds cumsum[k-1], giving cumsum[k-1]..cumsum[k]-1.
+    # Block 0 needs no offset and already holds 0..max_0-1.
+    cumulative = np.cumsum(per_block_max)
+
+    def _add_offset(block_id):
+        if block_id == 0:
+            return
+        blk      = blocking.getBlock(block_id)
+        inner_bb = tuple(slice(s, e) for s, e in zip(blk.begin, blk.end))
+        output[inner_bb] = output[inner_bb] + np.uint64(cumulative[block_id - 1])
+
+    with futures.ThreadPoolExecutor(n_threads) as tp:
+        list(tqdm(
+            tp.map(_add_offset, range(n_blocks)),
+            total=n_blocks, desc="  Applying offsets",
+        ))
+
+    max_id = int(cumulative[-1]) if n_blocks > 0 else 0
+    return output, max_id
+
+
+# ---------------------------------------------------------------------------
 # Watershed zarr: open existing or compute fresh
 # ---------------------------------------------------------------------------
 
 
 def _open_or_compute_watershed_zarr(
     ws_zarr_path, boundary_lazy, vol_shape, block_shape, halo,
-    use_2dws, ws_threshold, ws_sigma, n_threads,
+    ws_method, ws_threshold, ws_sigma, ws_min_size, ws_alpha,
+    ws_pixel_pitch, ws_apply_nonmax,
+    n_threads,
 ):
     """Return an open zarr array containing the watershed and the node count.
 
@@ -444,10 +591,22 @@ def _open_or_compute_watershed_zarr(
     immediately — the watershed computation is skipped entirely.  This lets
     callers reuse a watershed from a previous run for faster debugging.
 
-    When computing fresh the watershed is first written into a temporary
-    numpy memmap (required by elf / vigra), then copied block-by-block into
-    a zarr with labels shifted to 0-indexed.  The memmap is deleted
-    immediately after the copy.
+    For the ``"ilastik"`` method the watershed writes directly into the zarr —
+    no temporary memmap is needed because blocks are independent and produce
+    globally consecutive 0-indexed labels without a relabeling pass.
+
+    For ``"two-pass"`` and ``"2d"`` the watershed is first written into a
+    temporary numpy memmap (required by elf / vigra for in-place seed
+    propagation or stacked slices), then relabeled and copied to zarr.
+
+    ws_method : ``"ilastik"`` | ``"two-pass"`` | ``"2d"``
+        ``"ilastik"``   – mirrors ``parallel_watershed`` in ilastik's opWsdt.py:
+                          128³ blocks, 10-voxel halo, hard block boundaries,
+                          vigra.labelMultiArray per inner block, cumulative
+                          offsets.  Produces pixel-identical superpixels when
+                          the same parameters and the same boundary map are used.
+        ``"two-pass"``  – elf checkerboard two-pass watershed (old default).
+        ``"2d"``        – stacked 2-D watershed (for strongly anisotropic data).
     """
     import zarr
     from elf.segmentation.watershed import stacked_watershed
@@ -476,20 +635,42 @@ def _open_or_compute_watershed_zarr(
                 f"  Could not open {ws_zarr_path!r} ({exc}), recomputing …"
             )
 
-    # --- Compute fresh watershed into a temporary memmap ---
+    print(f"Computing watershed ({ws_method!r} method) → {ws_zarr_path} …")
+
+    if ws_method == "ilastik":
+        # Blocks are independent and produce globally consecutive 0-indexed labels,
+        # so we can write directly into the zarr — no memmap or relabeling needed.
+        ndim = len(vol_shape)
+        ws_zarr_arr = zarr.open(
+            ws_zarr_path, mode="w",
+            shape=vol_shape, dtype="uint64",
+            chunks=(128,) * ndim,   # must match _ilastik_parallel_watershed's BLOCK_SHAPE
+        )
+        _, n_nodes = _ilastik_parallel_watershed(
+            boundary_lazy, vol_shape,
+            ws_threshold, ws_sigma, ws_min_size, ws_alpha,
+            ws_pixel_pitch, ws_apply_nonmax,
+            n_threads, ws_zarr_arr,
+        )
+        ws_zarr_arr.attrs["n_superpixels"] = n_nodes
+        print(f"  Watershed zarr written to {ws_zarr_path} ({n_nodes} superpixels)")
+        return ws_zarr_arr, n_nodes
+
+    # --- two-pass and 2d methods: compute into a temporary memmap, then
+    #     relabel (labels are sparse / non-consecutive) and write to zarr ---
     _memmap_path = str(_Path(ws_zarr_path).parent / "_ws_compute_tmp.dat")
-    print(f"Computing blockwise watershed → {ws_zarr_path} …")
     ws_memmap = np.memmap(_memmap_path, dtype="uint64", mode="w+", shape=vol_shape)
 
     try:
-        if use_2dws:
+        if ws_method == "2d":
             print("  Using stacked 2D watershed (lazy z-slices) …")
             _, max_id = stacked_watershed(
                 boundary_lazy,
                 threshold=ws_threshold, sigma_seeds=ws_sigma,
+                sigma_weights=ws_sigma, min_size=ws_min_size, alpha=ws_alpha,
                 n_threads=n_threads, output=ws_memmap,
             )
-        else:
+        elif ws_method == "two-pass":
             ws_block_shape = _ensure_even_block_count(vol_shape, block_shape)
             if ws_block_shape != block_shape:
                 print(
@@ -503,21 +684,15 @@ def _open_or_compute_watershed_zarr(
                 ws_function=_safe_distance_transform_watershed,
                 threshold=ws_threshold,
                 sigma_seeds=ws_sigma,
+                sigma_weights=ws_sigma,
+                min_size=ws_min_size,
+                alpha=ws_alpha,
                 n_threads=n_threads,
                 output=ws_memmap,
             )
+        else:
+            raise ValueError(f"Unknown ws_method {ws_method!r}; choose 'ilastik', 'two-pass', or '2d'.")
 
-        # Relabel memmap (sparse uint64) → consecutive 0-indexed labels and
-        # write to zarr.  This is done in two parallel passes by
-        # _relabel_and_write_zarr, which replaces two former bottlenecks:
-        #   (a) vigra.analysis.relabelConsecutive on the full memmap – single-
-        #       threaded and tries to pull the entire array into RAM;
-        #   (b) a serial Python for-loop that copied memmap → zarr one block
-        #       at a time.
-        # max_id returned by _blockwise_two_pass_watershed is None (deferred).
-        # For stacked_watershed max_id is the vigra-consecutive max; we still
-        # run _relabel_and_write_zarr so the zarr output is always 0-indexed
-        # consecutive regardless of the watershed variant used.
         ws_zarr_arr = zarr.open(
             ws_zarr_path, mode="w",
             shape=vol_shape, dtype="uint64",
@@ -527,7 +702,6 @@ def _open_or_compute_watershed_zarr(
             ws_memmap, ws_zarr_arr, vol_shape, block_shape, n_threads
         )
         ws_zarr_arr.attrs["n_superpixels"] = n_nodes
-
         print(f"  Watershed zarr written to {ws_zarr_path} ({n_nodes} superpixels)")
 
     finally:
@@ -758,7 +932,9 @@ def compute_ilastikrag_features(
 def _run_lazy(
     ilp_path, rf, channel_specs, output_zarr_path, output_zarr_key,
     beta, block_shape, halo, internal_solver, n_threads,
-    use_2dws, ws_threshold, ws_sigma, ws_zarr_path,
+    ws_method, ws_threshold, ws_sigma, ws_min_size, ws_alpha,
+    ws_pixel_pitch, ws_apply_nonmax, ws_invert,
+    ws_zarr_path,
     keep_watershed=True,
 ):
     import nifty
@@ -785,16 +961,23 @@ def _run_lazy(
         vol_shape = tuple(boundary_lazy.shape)
         print(f"Volume shape: {vol_shape}")
 
+        # Apply probability inversion for the watershed only (not for features).
+        ws_input = _InvertedLazyArray(boundary_lazy) if ws_invert else boundary_lazy
+
         # --- Blockwise watershed: reuse existing zarr or compute fresh ---
         ws_zarr_arr, n_nodes = _open_or_compute_watershed_zarr(
             ws_zarr_path=ws_zarr_path,
-            boundary_lazy=boundary_lazy,
+            boundary_lazy=ws_input,
             vol_shape=vol_shape,
             block_shape=block_shape,
             halo=halo,
-            use_2dws=use_2dws,
+            ws_method=ws_method,
             ws_threshold=ws_threshold,
             ws_sigma=ws_sigma,
+            ws_min_size=ws_min_size,
+            ws_alpha=ws_alpha,
+            ws_pixel_pitch=ws_pixel_pitch,
+            ws_apply_nonmax=ws_apply_nonmax,
             n_threads=n_threads,
         )
         # ws_zarr_arr contains 0-indexed labels (0…n_nodes-1).

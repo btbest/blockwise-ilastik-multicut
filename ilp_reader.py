@@ -15,6 +15,11 @@ discover_lanes(ilp_path)
 read_feature_names(ilp_path)
     Returns the FeatureNames dict: {channel_name -> [feature_name, ...]}.
 
+read_wsdt_params(ilp_path)
+    Returns the DT Watershed applet parameters as a dict:
+    {threshold, min_size, sigma, alpha}.  Falls back to ilastik defaults
+    when the group is absent (old projects).
+
 read_training_data(ilp_path, lane=None)
     If lane is None (default), reads all lanes and concatenates.
     Returns (X, y, feature_columns) where X is a float32 ndarray of shape
@@ -38,6 +43,7 @@ import numpy as np
 import pandas as pd
 
 APPLET_GROUP = "Training and Multicut"
+WSDT_GROUP = "DT Watershed"
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +153,74 @@ def read_feature_names(ilp_path: str) -> dict:
                 else:
                     result[channel_name] = [_decode(raw)]
     return result
+
+
+def read_wsdt_params(ilp_path: str) -> dict:
+    """
+    Read DT Watershed applet parameters from an ilastik project file.
+
+    Returns
+    -------
+    dict with keys:
+        threshold   (float)       – boundary probability threshold (default 0.5)
+        min_size    (int)         – minimum superpixel size in pixels (default 100)
+        sigma       (float)       – smoothing applied to both seed and weight maps (default 3.0)
+        alpha       (float)       – blend factor between boundary data and distance
+                                    transform (default 0.9)
+        pixel_pitch (list | None) – anisotropy factors [z, y, x]; None = isotropic
+        blockwise   (bool)        – True when ilastik ran its blockwise (128³, halo=10)
+                                    watershed; False for very old projects that ran on
+                                    the full crop at once
+
+    If the ``DT Watershed`` group is absent (e.g. very old project files) or
+    any individual key is missing, the ilastik defaults are returned for that
+    entry.
+
+    Notes
+    -----
+    The ``InvertPixelProbabilities`` flag is *not* serialised by ilastik and
+    therefore cannot be read from the file.  Pass it explicitly via the
+    ``--ws-invert`` CLI flag when needed.
+    """
+    defaults = {
+        "threshold": 0.5,
+        "min_size":  100,
+        "sigma":     3.0,
+        "alpha":     0.9,
+        "pixel_pitch": None,  # None → isotropic (no anisotropy correction)
+        "blockwise": True,    # False only for very old projects (pre-v0.2 serialiser)
+    }
+    try:
+        with h5py.File(ilp_path, "r") as f:
+            if WSDT_GROUP not in f:
+                return dict(defaults)
+            g = f[WSDT_GROUP]
+            result = {}
+            result["threshold"] = float(g["Threshold"][()]) if "Threshold" in g else defaults["threshold"]
+            result["min_size"]  = int(g["MinSize"][()])     if "MinSize"   in g else defaults["min_size"]
+            result["sigma"]     = float(g["Sigma"][()])     if "Sigma"     in g else defaults["sigma"]
+            result["alpha"]     = float(g["Alpha"][()])     if "Alpha"     in g else defaults["alpha"]
+
+            # PixelPitch is stored as a list; [] means isotropic → pass None to elf.
+            if "PixelPitch" in g:
+                raw = g["PixelPitch"][()]
+                if hasattr(raw, "tolist"):
+                    raw = raw.tolist()
+                result["pixel_pitch"] = raw if raw else None
+            else:
+                result["pixel_pitch"] = defaults["pixel_pitch"]
+
+            # BlockwiseWatershed is absent in v0.1 projects; SerialDefaultSlot
+            # sets it to False in that case, meaning ilastik ran the watershed
+            # on the full crop (not blockwise).
+            if "BlockwiseWatershed" in g:
+                result["blockwise"] = bool(g["BlockwiseWatershed"][()])
+            else:
+                result["blockwise"] = False  # old project, no key → ilastik default was False
+
+            return result
+    except Exception:
+        return dict(defaults)
 
 
 def read_edge_labels(ilp_path: str, lane: int = 0) -> dict:
