@@ -567,6 +567,98 @@ def _find_boundary_channel(feature_names: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _compute_features_two_sp(superpixels, channel_data, feature_names):
+    """
+    Compute ilastikrag-compatible edge features for a block with exactly
+    2 foreground superpixels (1 edge) without calling ilastikrag's C++ layer.
+
+    ilastikrag crashes on 2-node RAGs (a degenerate but valid configuration
+    that occurs, e.g., when a single membrane bisects the entire block).
+    This fallback replicates the standard ilastikrag feature semantics with
+    pure numpy / scipy:
+
+      standard_sp_*          → |stat(sp_a) − stat(sp_b)|   (absolute difference)
+      standard_edge_*        → stat over boundary voxels
+      edgeregion_edge_*radii → PCA eigenvalues of boundary-voxel coordinates
+
+    Any other feature name falls back to 0.0 with a warning.
+
+    Returns
+    -------
+    features : float32 ndarray  (1, N_features)
+    edge_ids : uint64 ndarray   (1, 2)
+    """
+    import pandas as pd
+    from scipy.ndimage import binary_dilation
+
+    fg = np.sort(np.unique(superpixels[superpixels > 0]))
+    sp_a, sp_b = int(fg[0]), int(fg[1])
+
+    mask_a = superpixels == sp_a
+    mask_b = superpixels == sp_b
+
+    # 6-connected structuring element (face-adjacency only, matching vigra's RAG).
+    ndim = superpixels.ndim
+    struct = np.zeros((3,) * ndim, dtype=bool)
+    center = (1,) * ndim
+    for ax in range(ndim):
+        for delta in (-1, 1):
+            idx = list(center)
+            idx[ax] += delta
+            struct[tuple(idx)] = True
+
+    # Two-sided boundary (voxels of sp_a adjacent to sp_b, and vice versa).
+    boundary_mask = (mask_a & binary_dilation(mask_b, structure=struct)) | \
+                    (mask_b & binary_dilation(mask_a, structure=struct))
+    boundary_coords = np.argwhere(boundary_mask).astype(np.float32)
+
+    feature_dfs = []
+    for channel_name, feat_names in feature_names.items():
+        data = np.asarray(channel_data[channel_name], dtype=np.float32)
+        vals_a = data[mask_a].ravel()
+        vals_b = data[mask_b].ravel()
+        vals_e = data[boundary_mask].ravel()
+
+        row = {}
+        for fn in feat_names:
+            if fn == "standard_sp_mean":
+                row[fn] = float(abs(vals_a.mean() - vals_b.mean()))
+            elif fn.startswith("standard_sp_quantiles_"):
+                q = int(fn.rsplit("_", 1)[-1])
+                row[fn] = float(abs(np.percentile(vals_a, q) - np.percentile(vals_b, q)))
+            elif fn == "standard_edge_mean":
+                row[fn] = float(vals_e.mean()) if vals_e.size else 0.0
+            elif fn.startswith("standard_edge_quantiles_"):
+                q = int(fn.rsplit("_", 1)[-1])
+                row[fn] = float(np.percentile(vals_e, q)) if vals_e.size else 0.0
+            elif fn.startswith("edgeregion_edge_regionradii_"):
+                idx = int(fn.rsplit("_", 1)[-1])
+                if boundary_coords.shape[0] >= ndim:
+                    centered = boundary_coords - boundary_coords.mean(axis=0)
+                    cov = (centered.T @ centered) / boundary_coords.shape[0]
+                    eigvals = np.sqrt(np.maximum(np.linalg.eigvalsh(cov), 0.0))
+                    eigvals = eigvals[::-1]  # largest first (eigvalsh returns ascending)
+                    row[fn] = float(eigvals[idx]) if idx < eigvals.size else 0.0
+                else:
+                    row[fn] = 0.0
+            else:
+                warnings.warn(
+                    f"Feature {fn!r} has no 2-SP fallback implementation; using 0.0.",
+                    stacklevel=4,
+                )
+                row[fn] = 0.0
+
+        feat_cols = list(row.keys())
+        df = pd.DataFrame([row])[feat_cols].rename(
+            columns={c: f"{channel_name} {c}" for c in feat_cols}
+        )
+        feature_dfs.append(df)
+
+    features = pd.concat(feature_dfs, axis=1).values.astype(np.float32)
+    edge_ids = np.array([[sp_a, sp_b]], dtype=np.uint64)
+    return features, edge_ids
+
+
 def compute_ilastikrag_features(
     superpixels: np.ndarray,
     channel_data: dict,
@@ -585,9 +677,30 @@ def compute_ilastikrag_features(
     -------
     features : float32 ndarray  (N_edges, N_features)
     edge_ids : uint64 ndarray   (N_edges, 2)
+
+    Raises
+    ------
+    ValueError  if the block has fewer than 2 unique foreground superpixel
+                labels (no edges → nothing to compute).
     """
-    import ilastikrag
     import pandas as pd
+
+    unique_labels = np.unique(superpixels)
+    # ilastikrag treats 0 as background; exclude it from the label count.
+    n_fg_labels = int((unique_labels > 0).sum())
+    if n_fg_labels < 2:
+        raise ValueError(
+            f"Block has only {n_fg_labels} foreground superpixel label(s) "
+            f"(unique: {unique_labels.tolist()[:10]}); no edges to compute."
+        )
+
+    # ilastikrag's C++ layer crashes on a 2-node RAG (exactly 1 edge), which is
+    # a valid configuration when a single membrane bisects the block.  Use a
+    # pure-numpy fallback in that case.
+    if n_fg_labels == 2:
+        return _compute_features_two_sp(superpixels, channel_data, feature_names)
+
+    import ilastikrag
     import vigra
 
     ndim = superpixels.ndim
@@ -786,9 +899,14 @@ def _run_lazy(
             }
 
             # Pass 1-indexed ws_block to ilastikrag (vigra treats 0 as background)
-            features, edge_ids = compute_ilastikrag_features(
-                ws_block, channel_block, feature_names
-            )
+            try:
+                features, edge_ids = compute_ilastikrag_features(
+                    ws_block, channel_block, feature_names
+                )
+            except ValueError:
+                # Block has < 2 foreground superpixel labels → no edges; skip.
+                continue
+
             probs = rf.predict_proba(features)[:, split_col]
             costs = compute_edge_costs(probs.astype(np.float32), beta=beta)
 
