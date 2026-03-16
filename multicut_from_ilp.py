@@ -781,7 +781,7 @@ def _run_lazy(
             # (vigra treats 0 as background; our zarr uses 0 as first superpixel).
             ws_block = np.array(ws_zarr_arr[outer_bb]) + np.uint64(1)
             channel_block = {
-                name: np.array(lazy_arrays[name][outer_bb])
+                name: _Float32LazyArray(lazy_arrays[name])[outer_bb]
                 for name in feature_names
             }
 
