@@ -250,16 +250,25 @@ class _Float32LazyArray:
     vigra.analysis.watershedsNew only supports uint8 and float32.  H5py
     datasets and zarr arrays stored as float64 (or any other type) must be
     cast before being handed to elf / vigra.
+
+    A trailing size-1 channel dimension (e.g. shape (Z, Y, X, 1)) is
+    automatically stripped so the rest of the pipeline always sees a 3-D
+    spatial array.
     """
 
     def __init__(self, arr):
         self._arr = arr
-        self.shape = arr.shape
+        # Strip a trailing size-1 channel axis if present.
+        self._squeeze_channel = (arr.ndim == 4 and arr.shape[-1] == 1)
+        self.shape = arr.shape[:3] if self._squeeze_channel else arr.shape
         self.dtype = np.dtype("float32")
-        self.ndim = arr.ndim
+        self.ndim = len(self.shape)
 
     def __getitem__(self, key):
-        return np.asarray(self._arr[key], dtype=np.float32)
+        data = np.asarray(self._arr[key], dtype=np.float32)
+        if self._squeeze_channel and data.ndim == 4:
+            data = data[..., 0]
+        return data
 
 def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None, **kwargs):
     """Wraps elf's distance_transform_watershed, handling flat / empty blocks.
