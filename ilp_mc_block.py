@@ -255,7 +255,7 @@ def main():
         output_zarr_key="seg",
         beta=args.beta,
         block_shape=tuple(args.max_block_shape),
-        halo=tuple(args.halo),
+        halo=list(args.halo),
         internal_solver=args.solver,
         n_threads=args.threads,
         use_2dws=args.use_2dws,

@@ -958,12 +958,14 @@ def _run_lazy(
         # ws_zarr_arr supports __getitem__ with slice tuples, which is all
         # blockwise_mc_impl needs (it calls segmentation[bb] per block).
         print(f"Running blockwise multicut (block_shape={block_shape}, solver={internal_solver}) …")
+        # nifty's C++ getBlockWithHalo binding requires List[int], not tuple.
+        halo_list = list(halo) if halo is not None else None
         node_labels = blockwise_multicut(
             graph, edge_costs, ws_zarr_arr,
             internal_solver=internal_solver,
             block_shape=block_shape,
             n_threads=n_threads,
-            halo=halo,
+            halo=halo_list,
         )
         del edge_costs
         n_segments = len(np.unique(node_labels))
