@@ -206,6 +206,26 @@ class _Float32LazyArray:
         return data
 
 
+class _InvertedLazyArray:
+    """Lazy wrapper that returns ``1 - block`` on every slice read.
+
+    Used when ``InvertPixelProbabilities`` is active: the boundary map is
+    stored as high-value = membrane, but elf's distance transform watershed
+    expects high-value = interior (i.e. the complement).  Only the watershed
+    input is inverted; the raw boundary values used for edge-feature
+    computation are left unchanged.
+    """
+
+    def __init__(self, arr):
+        self._arr = arr
+        self.shape = arr.shape
+        self.dtype = arr.dtype
+        self.ndim  = arr.ndim
+
+    def __getitem__(self, key):
+        return np.float32(1.0) - self._arr[key]
+
+
 def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None, **kwargs):
     """Wraps elf's distance_transform_watershed, handling flat / empty blocks.
 
@@ -431,7 +451,7 @@ def _relabel_and_write_zarr(ws_memmap, ws_zarr_arr, vol_shape, block_shape, n_th
 
 def _open_or_compute_watershed_zarr(
     ws_zarr_path, boundary_lazy, vol_shape, block_shape, halo,
-    use_2dws, ws_threshold, ws_sigma, n_threads,
+    use_2dws, ws_threshold, ws_sigma, ws_min_size, ws_alpha, n_threads,
 ):
     """Return an open zarr array containing the watershed and the node count.
 
@@ -487,6 +507,7 @@ def _open_or_compute_watershed_zarr(
             _, max_id = stacked_watershed(
                 boundary_lazy,
                 threshold=ws_threshold, sigma_seeds=ws_sigma,
+                sigma_weights=ws_sigma, min_size=ws_min_size, alpha=ws_alpha,
                 n_threads=n_threads, output=ws_memmap,
             )
         else:
@@ -503,6 +524,9 @@ def _open_or_compute_watershed_zarr(
                 ws_function=_safe_distance_transform_watershed,
                 threshold=ws_threshold,
                 sigma_seeds=ws_sigma,
+                sigma_weights=ws_sigma,
+                min_size=ws_min_size,
+                alpha=ws_alpha,
                 n_threads=n_threads,
                 output=ws_memmap,
             )
@@ -758,7 +782,8 @@ def compute_ilastikrag_features(
 def _run_lazy(
     ilp_path, rf, channel_specs, output_zarr_path, output_zarr_key,
     beta, block_shape, halo, internal_solver, n_threads,
-    use_2dws, ws_threshold, ws_sigma, ws_zarr_path,
+    use_2dws, ws_threshold, ws_sigma, ws_min_size, ws_alpha, ws_invert,
+    ws_zarr_path,
     keep_watershed=True,
 ):
     import nifty
@@ -785,16 +810,21 @@ def _run_lazy(
         vol_shape = tuple(boundary_lazy.shape)
         print(f"Volume shape: {vol_shape}")
 
+        # Apply probability inversion for the watershed only (not for features).
+        ws_input = _InvertedLazyArray(boundary_lazy) if ws_invert else boundary_lazy
+
         # --- Blockwise watershed: reuse existing zarr or compute fresh ---
         ws_zarr_arr, n_nodes = _open_or_compute_watershed_zarr(
             ws_zarr_path=ws_zarr_path,
-            boundary_lazy=boundary_lazy,
+            boundary_lazy=ws_input,
             vol_shape=vol_shape,
             block_shape=block_shape,
             halo=halo,
             use_2dws=use_2dws,
             ws_threshold=ws_threshold,
             ws_sigma=ws_sigma,
+            ws_min_size=ws_min_size,
+            ws_alpha=ws_alpha,
             n_threads=n_threads,
         )
         # ws_zarr_arr contains 0-indexed labels (0…n_nodes-1).
