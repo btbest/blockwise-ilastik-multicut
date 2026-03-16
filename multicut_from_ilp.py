@@ -567,6 +567,28 @@ def _find_boundary_channel(feature_names: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+_ilastikrag_versions_printed = False
+
+
+def _print_ilastikrag_versions():
+    """Print ilastikrag and vigra version info once for diagnostic purposes."""
+    global _ilastikrag_versions_printed
+    if _ilastikrag_versions_printed:
+        return
+    _ilastikrag_versions_printed = True
+    try:
+        import ilastikrag
+        ilr_ver = getattr(ilastikrag, "__version__", "unknown")
+    except Exception:
+        ilr_ver = "import failed"
+    try:
+        import vigra
+        vigra_ver = getattr(vigra, "__version__", "unknown")
+    except Exception:
+        vigra_ver = "import failed"
+    print(f"  [diag] ilastikrag={ilr_ver}  vigra={vigra_ver}")
+
+
 def compute_ilastikrag_features(
     superpixels: np.ndarray,
     channel_data: dict,
@@ -585,15 +607,35 @@ def compute_ilastikrag_features(
     -------
     features : float32 ndarray  (N_edges, N_features)
     edge_ids : uint64 ndarray   (N_edges, 2)
+
+    Raises
+    ------
+    ValueError  if the block has fewer than 2 unique superpixel labels
+                (no edges → nothing to compute).
     """
     import ilastikrag
     import pandas as pd
     import vigra
 
+    _print_ilastikrag_versions()
+
+    unique_labels = np.unique(superpixels)
+    # ilastikrag treats 0 as background; exclude it from the count.
+    n_fg_labels = int((unique_labels > 0).sum())
+    if n_fg_labels < 2:
+        raise ValueError(
+            f"Block has only {n_fg_labels} foreground superpixel label(s) "
+            f"(unique labels: {unique_labels.tolist()[:10]}); "
+            "no edges can be computed — skipping."
+        )
+
     ndim = superpixels.ndim
     axes = "zyx"[-ndim:]
     sp_vigra = vigra.taggedView(superpixels.astype(np.uint32), axes)
+    print(f"    [diag] calling ilastikrag.Rag on block shape={superpixels.shape}, "
+          f"n_fg_labels={n_fg_labels}, sp dtype={sp_vigra.dtype}", flush=True)
     rag = ilastikrag.Rag(sp_vigra)
+    print(f"    [diag] Rag built: {rag.edge_ids.shape[0]} edges", flush=True)
 
     feature_dfs = []
     for channel_name, feat_names in feature_names.items():
@@ -603,6 +645,7 @@ def compute_ilastikrag_features(
                 f"was not provided. Available: {list(channel_data)}"
             )
         data = vigra.taggedView(np.asarray(channel_data[channel_name], dtype=np.float32), axes)
+        print(f"    [diag] computing features {feat_names} for channel {channel_name!r}", flush=True)
         df = rag.compute_features(data, feat_names)
         feat_cols = [c for c in df.columns if c not in ("sp1", "sp2")]
         df = df[feat_cols].rename(
@@ -755,6 +798,25 @@ def _run_lazy(
         n_blocks = blocking.numberOfBlocks
         print(f"Watershed complete: {n_nodes} superpixels across {n_blocks} blocks.")
 
+        # Sanity-check: a 256³ crop should yield hundreds to tens-of-thousands of
+        # superpixels.  Fewer than 3 almost always means the watershed zarr is a
+        # stale artefact from a previous aborted run or the ws-threshold is wrong.
+        _min_expected = max(3, n_blocks)
+        if n_nodes < _min_expected:
+            warnings.warn(
+                f"\n*** Only {n_nodes} superpixel(s) found in a {vol_shape} volume "
+                f"({n_blocks} block(s)). ***\n"
+                "This is almost certainly wrong and will cause ilastikrag to crash.\n"
+                "Likely causes:\n"
+                "  1. A stale watershed zarr from a previous bad run is being reused.\n"
+                f"     → Delete {ws_zarr_path!r} and re-run.\n"
+                "  2. --ws-threshold is too high (most of the boundary channel is\n"
+                "     below threshold, leaving almost nothing for the DT watershed).\n"
+                "     → Try a lower value, e.g. --ws-threshold 0.2 or 0.1.\n"
+                "  3. The boundary channel file is all-zeros or near-zero.",
+                stacklevel=2,
+            )
+
         # --- Blockwise feature computation ---
         # Accumulate edge arrays as numpy per block rather than building a Python
         # dict of tuple keys.  The dict approach costs ~300 bytes per edge in
@@ -786,9 +848,15 @@ def _run_lazy(
             }
 
             # Pass 1-indexed ws_block to ilastikrag (vigra treats 0 as background)
-            features, edge_ids = compute_ilastikrag_features(
-                ws_block, channel_block, feature_names
-            )
+            try:
+                features, edge_ids = compute_ilastikrag_features(
+                    ws_block, channel_block, feature_names
+                )
+            except ValueError as exc:
+                # Block has < 2 foreground labels → no edges; skip silently.
+                warnings.warn(f"  block {block_id}: {exc}", stacklevel=2)
+                continue
+
             probs = rf.predict_proba(features)[:, split_col]
             costs = compute_edge_costs(probs.astype(np.float32), beta=beta)
 
