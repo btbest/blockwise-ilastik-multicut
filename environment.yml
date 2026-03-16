@@ -24,3 +24,7 @@ dependencies:
   - pip
   - python-elf
   - requests
+  - nomkl
+  - libblas=*=*openblas
+  - liblapack=*=*openblas
+  - libcblas=*=*openblas
