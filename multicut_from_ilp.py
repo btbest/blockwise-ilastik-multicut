@@ -390,8 +390,12 @@ def _blockwise_two_pass_watershed(
             desc="Run pass two of two-pass watershed",
         ))
 
-    _, max_id, _ = vigra.analysis.relabelConsecutive(output, out=output)
-    return output, max_id
+    # Do NOT call vigra.analysis.relabelConsecutive on the full memmap here.
+    # For a large volume (e.g. 5 GB input → ~38 GB uint64 memmap) that call is
+    # single-threaded and tries to pull the entire array into RAM, causing many
+    # hours of stall.  The caller (_open_or_compute_watershed_zarr) performs the
+    # relabeling blockwise in parallel via _relabel_and_write_zarr instead.
+    return output, None
 
 
 def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None, **kwargs):
@@ -413,6 +417,75 @@ def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None
     return distance_transform_watershed(
         input_, threshold=threshold, sigma_seeds=sigma_seeds, mask=mask, **kwargs
     )
+
+
+# ---------------------------------------------------------------------------
+# Parallel relabel + zarr write (replaces serial relabelConsecutive + copy)
+# ---------------------------------------------------------------------------
+
+
+def _relabel_and_write_zarr(ws_memmap, ws_zarr_arr, vol_shape, block_shape, n_threads):
+    """Map sparse uint64 labels in *ws_memmap* to consecutive 0-indexed labels
+    and write them to *ws_zarr_arr*.  Returns the number of unique superpixels.
+
+    Two parallel passes over the data:
+      Pass A – each thread reads its blocks from the memmap and returns the
+               unique label values found there.  Fully parallel, I/O-bound.
+      Pass B – after the global sorted-unique array is built (one
+               ``np.searchsorted`` lookup maps any sparse label to its
+               0-indexed consecutive counterpart), each thread reads its
+               blocks, applies the mapping and writes the zarr chunk.
+
+    This replaces two serial operations that stall on large volumes:
+      • ``vigra.analysis.relabelConsecutive(memmap, out=memmap)`` – reads and
+        writes the entire memmap in one shot, potentially pulling tens of GB
+        into RAM.
+      • A sequential Python ``for`` loop that copies memmap → zarr one block
+        at a time.
+    """
+    import nifty.tools as nt
+    from concurrent import futures
+    from tqdm import tqdm
+
+    blocking = nt.blocking([0] * len(vol_shape), list(vol_shape), list(block_shape))
+    n_blocks = blocking.numberOfBlocks
+
+    # --- Pass A: collect unique labels per block ---
+    def _collect(bid):
+        blk = blocking.getBlock(bid)
+        bb = tuple(slice(s, e) for s, e in zip(blk.begin, blk.end))
+        return np.unique(ws_memmap[bb])
+
+    print("  Collecting unique superpixel labels (parallel) …")
+    with futures.ThreadPoolExecutor(n_threads) as tp:
+        per_block = list(tqdm(
+            tp.map(_collect, range(n_blocks)),
+            total=n_blocks, desc="  Unique-label scan",
+        ))
+
+    all_labels = np.unique(np.concatenate(per_block))
+    del per_block
+    n_nodes = int(len(all_labels))
+    print(f"  {n_nodes} unique superpixel labels found.")
+
+    # --- Pass B: apply mapping and write zarr in parallel ---
+    # np.searchsorted(all_labels, x) maps each sparse label to its 0-indexed
+    # consecutive position; this is correct because all_labels is sorted and
+    # every element of ws_memmap is guaranteed to appear in all_labels.
+    def _write(bid):
+        blk = blocking.getBlock(bid)
+        bb = tuple(slice(s, e) for s, e in zip(blk.begin, blk.end))
+        block = np.array(ws_memmap[bb])
+        ws_zarr_arr[bb] = np.searchsorted(all_labels, block).astype(np.uint64)
+
+    print("  Writing watershed zarr (parallel) …")
+    with futures.ThreadPoolExecutor(n_threads) as tp:
+        list(tqdm(
+            tp.map(_write, range(n_blocks)),
+            total=n_blocks, desc="  Zarr write",
+        ))
+
+    return n_nodes
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +514,6 @@ def _open_or_compute_watershed_zarr(
     immediately after the copy.
     """
     import zarr
-    import nifty.tools as nt
     from elf.segmentation.watershed import stacked_watershed
     from pathlib import Path as _Path
 
@@ -499,29 +571,28 @@ def _open_or_compute_watershed_zarr(
                 output=ws_memmap,
             )
 
-        n_nodes = int(max_id)  # vigra 1-indexed max = number of superpixels
-        print(f"  {n_nodes} superpixels; writing to zarr …")
-
-        # Copy memmap (1-indexed, 1…max_id) → zarr (0-indexed, 0…max_id-1).
-        # All pixels are guaranteed ≥ 1 (no mask in the lazy pipeline), so
-        # the uint64 subtraction never wraps around.
+        # Relabel memmap (sparse uint64) → consecutive 0-indexed labels and
+        # write to zarr.  This is done in two parallel passes by
+        # _relabel_and_write_zarr, which replaces two former bottlenecks:
+        #   (a) vigra.analysis.relabelConsecutive on the full memmap – single-
+        #       threaded and tries to pull the entire array into RAM;
+        #   (b) a serial Python for-loop that copied memmap → zarr one block
+        #       at a time.
+        # max_id returned by _blockwise_two_pass_watershed is None (deferred).
+        # For stacked_watershed max_id is the vigra-consecutive max; we still
+        # run _relabel_and_write_zarr so the zarr output is always 0-indexed
+        # consecutive regardless of the watershed variant used.
         ws_zarr_arr = zarr.open(
             ws_zarr_path, mode="w",
             shape=vol_shape, dtype="uint64",
             chunks=block_shape,
         )
-        _copy_blocking = nt.blocking(
-            [0] * len(vol_shape), list(vol_shape), list(block_shape)
+        n_nodes = _relabel_and_write_zarr(
+            ws_memmap, ws_zarr_arr, vol_shape, block_shape, n_threads
         )
-        for _bid in range(_copy_blocking.numberOfBlocks):
-            _blk = _copy_blocking.getBlock(_bid)
-            _bb = tuple(
-                slice(s, e) for s, e in zip(_blk.begin, _blk.end)
-            )
-            ws_zarr_arr[_bb] = ws_memmap[_bb] - np.uint64(1)
         ws_zarr_arr.attrs["n_superpixels"] = n_nodes
 
-        print(f"  Watershed zarr written to {ws_zarr_path}")
+        print(f"  Watershed zarr written to {ws_zarr_path} ({n_nodes} superpixels)")
 
     finally:
         del ws_memmap
