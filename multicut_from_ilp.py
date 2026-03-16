@@ -62,6 +62,7 @@ to inspect channel names.
 """
 
 import argparse
+import logging
 import math
 import os
 import pickle
@@ -945,6 +946,16 @@ def _run_lazy(
         # Python object overhead; for large volumes (tens of millions of edges)
         # this easily exhausts RAM.  Numpy arrays use ~20 bytes per edge.
         print("Computing ilastikrag features blockwise …")
+
+        # ilastikrag's StandardEdgeAccumulator has a bug where it checks
+        # `if histogram_range:` (always True for a 2-element list) instead of
+        # `if histogram_range[0] == histogram_range[1]:`.  This makes the
+        # "All edge pixels are identical" warning fire for every block that
+        # uses quantile features, producing thousands of spurious log lines.
+        # Silence it here since it is not actionable.
+        logging.getLogger(
+            "ilastikrag.accumulators.standard.standard_edge_accumulator"
+        ).setLevel(logging.ERROR)
 
         split_col = int(np.argmax(rf.classes_))
         all_edges_list = []   # list of (N_i, 2) uint64 arrays (1-indexed, canonical)
