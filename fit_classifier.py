@@ -13,7 +13,7 @@ Usage (CLI)
     python fit_classifier.py \
         --ilp my_project.ilp \
         --output rf.pkl \
-        --n-estimators 200 \
+        --n-estimators 100 \
         --n-jobs 8
 
 Usage (Python)
@@ -38,7 +38,7 @@ from ilp_reader import read_feature_names, read_training_data
 def fit_rf_from_ilp(
     ilp_path: str,
     lane=None,
-    n_estimators: int = 200,
+    n_estimators: int = 100,
     n_jobs: int = -1,
     random_state: int = 42,
 ) -> RandomForestClassifier:
@@ -126,7 +126,7 @@ def main():
         "--lane", type=int, default=None,
         help="Lane index (default: None = all lanes concatenated)",
     )
-    parser.add_argument("--n-estimators", type=int, default=200)
+    parser.add_argument("--n-estimators", type=int, default=100)
     parser.add_argument("--n-jobs", type=int, default=-1)
     parser.add_argument("--random-state", type=int, default=42)
     args = parser.parse_args()

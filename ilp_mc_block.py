@@ -1,30 +1,25 @@
 """
-ilp_mc_block  –  single-command ilastik multicut pipeline
+ilp-mc-block  –  single-command ilastik multicut pipeline
 
 Fits the sklearn classifier from the .ilp training data, then immediately runs
 the blockwise lazy multicut on the provided raw data and boundary probabilities.
 All outputs land in --output-dir:
 
-    rf.pkl                          sklearn classifier (reusable)
+    rf.pkl                          sklearn random forest classifier
     <raw_stem>_segmentation.zarr    final segmentation (uint64, zyx)
-    <raw_stem>_watershed.zarr       watershed superpixels (kept by default)
+    <raw_stem>_watershed.zarr       watershed superpixels
     params.json                     exact call parameters for reproducibility
 
-The watershed zarr is kept by default.  Pass --no-keep-watershed to delete it
-after the run.  On a subsequent run pass --ws-zarr with its path to skip
-recomputation.
+Pass --no-keep-watershed to delete the watershed after the run.
+Or pass ws-zarr to point to a precomputed watershed zarr.
 
 Usage
 -----
     ilp-mc-block \\
         --ilp my_project.ilp \\
         --raw raw.zarr \\
-        --probabilities boundary.zarr \\
-        --output-dir results/ \\
-        [--max-block-shape 256 256 256] [--halo 32 32 32] \\
-        [--beta 0.5] [--threads 8] [--n-estimators 200] \\
-        [--use-2dws] [--ws-threshold 0.5] [--ws-sigma 2.0] \\
-        [--solver kernighan-lin]
+        --probabilities boundaries.zarr \\
+        --output-dir results/
 
 Input formats
 -------------
@@ -34,7 +29,8 @@ Both --raw and --probabilities accept local zarr stores and HDF5 files:
     /path/to/file.h5             HDF5 file (must contain exactly one dataset)
     C:\\Users\\...\\file.h5      Windows absolute paths are also supported
 
-Volumes must be in zyx axis order.  Both inputs must have the same shape.
+Volumes must be in zyx(c) axis order.  Both inputs must have the same shape.
+Singleton channel axis is accepted (ignored).
 """
 
 import argparse
@@ -45,37 +41,7 @@ from pathlib import Path
 
 from fit_classifier import fit_rf_from_ilp
 from ilp_reader import read_feature_names
-from multicut_from_ilp import _find_boundary_channel, _run_lazy
-
-
-_URL_SCHEMES = ("http://", "https://", "s3://", "gs://", "ftp://")
-
-
-def _parse_data_path(spec: str):
-    """
-    Return (path, None) for any data path spec.
-
-    HDF5 dataset keys are no longer specified via colon notation; the single
-    dataset inside the file is auto-detected when it is opened.  This also
-    avoids misinterpreting Windows drive-letter colons (e.g. C:\\...) as key
-    separators.
-    """
-    return spec, None
-
-
-def _find_raw_channel(feature_names: dict) -> str:
-    """Return the name of the raw data channel (contains 'raw', case-insensitive)."""
-    for name in feature_names:
-        if "raw" in name.lower():
-            return name
-    raise ValueError(
-        f"Cannot identify raw data channel in: {list(feature_names)}. "
-        "Expected a channel name containing 'raw' (case-insensitive)."
-    )
-
-
-def _build_channel_spec(channel_name: str, path: str, key) -> str:
-    return f"{channel_name}:{path}"
+from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_channel_spec, _run_lazy
 
 
 def main():
@@ -126,8 +92,8 @@ def main():
 
     # Classifier parameters
     parser.add_argument(
-        "--n-estimators", type=int, default=200,
-        help="Number of trees in the random forest (default: 200)",
+        "--n-estimators", type=int, default=100,
+        help="Number of trees in the random forest (default: 100)",
     )
 
     # Watershed parameters
@@ -170,8 +136,7 @@ def main():
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    raw_path, raw_key = _parse_data_path(args.raw)
-    raw_stem = Path(raw_path).stem          # e.g. "my_raw" from "my_raw.zarr"
+    raw_stem = Path(args.raw).stem          # e.g. "my_raw" from "my_raw.zarr"
 
     seg_zarr     = str(out / f"{raw_stem}_segmentation.zarr")
     rf_pkl       = str(out / "rf.pkl")
@@ -233,14 +198,12 @@ def main():
     print(f"  Raw channel      : {raw_channel!r}  →  {args.raw}")
     print(f"  Boundary channel : {boundary_channel!r}  →  {args.probabilities}")
 
-    probs_path, probs_key = _parse_data_path(args.probabilities)
-
     # Boundary channel must appear first in channel_specs so _run_lazy finds it
     # via _find_boundary_channel (order in the specs list does not matter for
     # feature computation, but placing it first is conventional).
     channel_specs = [
-        _build_channel_spec(boundary_channel, probs_path, probs_key),
-        _build_channel_spec(raw_channel,      raw_path,   raw_key),
+        _build_channel_spec(boundary_channel, args.probabilities),
+        _build_channel_spec(raw_channel,      args.raw),
     ]
 
     # -----------------------------------------------------------------------

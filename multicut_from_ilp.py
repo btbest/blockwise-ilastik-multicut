@@ -1,72 +1,6 @@
-"""
-multicut_from_ilp.py
-Run elf's blockwise multicut on a (potentially large) volume using an edge
-classifier extracted from an ilastik .ilp project file.
-
-Two modes
----------
-Default (in-memory):
-    Loads all data into numpy arrays.  Suitable for volumes ≲ available RAM.
-
-Lazy / blockwise (--lazy flag):
-    All input channels are opened lazily (zarr or h5py Dataset).
-    Watershed is computed block-by-block and written to a numpy memmap on
-    disk.  Features and edge costs are accumulated blockwise.  Only a few
-    blocks + the global edge cost dict need to fit in RAM simultaneously.
-    Suitable for volumes up to tens of GB.
-
-Usage
------
-In-memory (small volumes):
-
-    python multicut_from_ilp.py \\
-        --ilp my_project.ilp \\
-        --rf rf.pkl \\
-        --channels "Membrane Probabilities 0:/path/to/boundary.h5" \\
-                   "Raw Data 0:/path/to/raw.h5" \\
-        --output segmentation.h5 --output-key /seg
-
-Lazy blockwise (large volumes, e.g. 20 GB):
-
-    python multicut_from_ilp.py \\
-        --ilp my_project.ilp \\
-        --rf rf.pkl \\
-        --channels "Membrane Probabilities 0:/path/to/boundary.zarr" \\
-                   "Raw Data 0:/path/to/raw.zarr" \\
-        --lazy \\
-        --ws-zarr /scratch/watershed.zarr \\
-        --output-zarr segmentation.zarr \\
-        --block-shape 256 256 256 \\
-        --halo 32 32 32
-
-The watershed zarr is kept by default.  Pass --no-keep-watershed to delete
-it after the run.  On a subsequent run pass --ws-zarr with the same path
-to skip recomputation entirely.
-
-Web / remote zarr (requires fsspec and aiohttp):
-
-    python multicut_from_ilp.py \\
-        --ilp my_project.ilp \\
-        --rf rf.pkl \\
-        --channels "Membrane Probabilities 0:https://webknossos.org/.../boundary.zarr/s0" \\
-                   "Raw Data 0:https://webknossos.org/.../raw.zarr/s0" \\
-        --lazy \\
-        --ws-zarr /scratch/watershed.zarr \\
-        --output-zarr segmentation.zarr \\
-        --block-shape 256 256 256 \\
-        --halo 32 32 32
-
-Channel names must match those stored in the .ilp FeatureNames group.
-Run: python -c "from ilp_reader import read_feature_names; print(read_feature_names('my.ilp'))"
-to inspect channel names.
-"""
-
-import argparse
 import logging
 import math
 import os
-import pickle
-import sys
 import warnings
 
 import h5py
@@ -270,6 +204,7 @@ class _Float32LazyArray:
         if self._squeeze_channel and data.ndim == 4:
             data = data[..., 0]
         return data
+
 
 def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None, **kwargs):
     """Wraps elf's distance_transform_watershed, handling flat / empty blocks.
@@ -608,8 +543,19 @@ def _open_or_compute_watershed_zarr(
 
 
 # ---------------------------------------------------------------------------
-# Boundary channel identification
+# Channel handling
 # ---------------------------------------------------------------------------
+
+
+def _find_raw_channel(feature_names: dict) -> str:
+    """Return the name of the raw data channel (contains 'raw', case-insensitive)."""
+    for name in feature_names:
+        if "raw" in name.lower():
+            return name
+    raise ValueError(
+        f"Cannot identify raw data channel in: {list(feature_names)}. "
+        "Expected a channel name containing 'raw' (case-insensitive)."
+    )
 
 
 def _find_boundary_channel(feature_names: dict) -> str:
@@ -632,6 +578,10 @@ def _find_boundary_channel(feature_names: dict) -> str:
         if "raw" not in name.lower():
             return name
     return next(iter(feature_names))
+
+
+def _build_channel_spec(channel_name: str, path: str) -> str:
+    return f"{channel_name}:{path}"
 
 
 # ---------------------------------------------------------------------------
@@ -798,92 +748,6 @@ def compute_ilastikrag_features(
     edge_ids = rag.edge_ids.astype(np.uint64)  # (N_edges, 2)
     features = pd.concat(feature_dfs, axis=1).values.astype(np.float32)
     return features, edge_ids
-
-
-# ---------------------------------------------------------------------------
-# In-memory pipeline (original, for moderate volumes)
-# ---------------------------------------------------------------------------
-
-
-def _run_in_memory(
-    ilp_path, rf, channel_specs, output_path, output_key,
-    beta, block_shape, halo, internal_solver, n_threads,
-    use_2dws, ws_threshold, ws_sigma,
-):
-    import nifty
-    from elf.segmentation.features import compute_rag, project_node_labels_to_pixels
-    from elf.segmentation.multicut import blockwise_multicut, compute_edge_costs
-    from elf.segmentation.watershed import distance_transform_watershed, stacked_watershed
-
-    feature_names = read_feature_names(ilp_path)
-
-    channel_data = {}
-    for spec in channel_specs:
-        ch_name, fpath, fkey = _parse_channel_spec(spec)
-        print(f"  Loading {ch_name!r} from {fpath} …")
-        channel_data[ch_name] = _load_channel(fpath, fkey)
-
-    vol_shape = next(iter(channel_data.values())).shape
-    boundary_channel = _find_boundary_channel(feature_names)
-    boundary_map = channel_data[boundary_channel].astype(np.float32)
-
-    print("Computing watershed …")
-    if use_2dws:
-        watershed, _ = stacked_watershed(
-            boundary_map, threshold=ws_threshold, sigma_seeds=ws_sigma, n_threads=n_threads,
-        )
-    else:
-        watershed, _ = distance_transform_watershed(
-            boundary_map, threshold=ws_threshold, sigma_seeds=ws_sigma,
-        )
-    watershed = watershed.astype(np.uint32)
-
-    print("Computing features …")
-    # Compute features while the watershed still has vigra-convention 1-indexed
-    # labels; ilastikrag.Rag treats 0 as background and must see 1-indexed SPs.
-    features, edge_ids = compute_ilastikrag_features(watershed, channel_data, feature_names)
-
-    # Re-index watershed and edge_ids to 0-based.
-    # vigra / elf watershed is 1-indexed (labels 1..N, 0 never used without a mask).
-    # Keeping the phantom node 0 in the nifty graph causes an isolated node that
-    # triggers an off-by-one in blockwise_mc_impl when it sizes the reduced graph
-    # from edge endpoints only (conda-forge python-elf 0.7.4).
-    if watershed.min() > 0:
-        watershed = watershed - 1
-        edge_ids = edge_ids - 1
-
-    n_labels = int(watershed.max()) + 1
-    print(f"  {n_labels} superpixels")
-
-    print("Predicting edge probabilities …")
-    split_col = int(np.argmax(rf.classes_))
-    edge_probs = rf.predict_proba(features)[:, split_col].astype(np.float32)
-
-    costs = compute_edge_costs(edge_probs, beta=beta)
-
-    print("Building graph …")
-    graph = nifty.graph.undirectedGraph(n_labels)
-    graph.insertEdges(edge_ids)
-
-    print(f"Running blockwise multicut (block_shape={block_shape}) …")
-    node_labels = blockwise_multicut(
-        graph, costs, watershed,
-        internal_solver=internal_solver,
-        block_shape=block_shape, n_threads=n_threads, halo=halo,
-    )
-
-    print("Projecting labels …")
-    elf_rag = compute_rag(watershed, n_labels=n_labels, n_threads=n_threads)
-    segmentation = project_node_labels_to_pixels(elf_rag, node_labels, n_threads=n_threads)
-    print(f"  {len(np.unique(segmentation))} final segments")
-
-    print(f"Saving to {output_path}:{output_key} …")
-    with h5py.File(output_path, "a") as f:
-        if output_key in f:
-            del f[output_key]
-        f.create_dataset(output_key, data=segmentation, compression="gzip")
-
-    return segmentation
 
 
 # ---------------------------------------------------------------------------
@@ -1082,169 +946,3 @@ def _run_lazy(
         print(f"Watershed zarr kept at {ws_zarr_path}")
 
     print("Done.")
-
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
-
-def run_blockwise_multicut(
-    ilp_path: str,
-    rf_path: str,
-    channel_specs: list,
-    output_path: str = None,
-    output_key: str = "/seg",
-    output_zarr_path: str = None,
-    output_zarr_key: str = "seg",
-    lazy: bool = False,
-    beta: float = 0.5,
-    block_shape: tuple = (256, 256, 256),
-    halo: tuple = (32, 32, 32),
-    internal_solver: str = "kernighan-lin",
-    n_threads: int = 8,
-    use_2dws: bool = False,
-    ws_threshold: float = 0.5,
-    ws_sigma: float = 2.0,
-    ws_zarr_path: str = "watershed.zarr",
-    keep_watershed: bool = True,
-):
-    """
-    Full multicut pipeline using an ilastik-trained sklearn RF.
-
-    Parameters
-    ----------
-    lazy : bool
-        If True, use the blockwise lazy pipeline (for large volumes).
-        Requires zarr output (output_zarr_path).
-        If False (default), load all data into memory (simpler, faster for
-        volumes that fit in RAM).
-    """
-    print(f"Loading classifier from {rf_path} …")
-    with open(rf_path, "rb") as f:
-        rf = pickle.load(f)
-
-    feature_names = read_feature_names(ilp_path)
-    print("Feature names per channel (from .ilp):")
-    for ch, feats in feature_names.items():
-        print(f"  {ch!r}: {feats}")
-
-    if lazy:
-        if output_zarr_path is None:
-            raise ValueError("--output-zarr is required in lazy mode.")
-        _run_lazy(
-            ilp_path=ilp_path, rf=rf, channel_specs=channel_specs,
-            output_zarr_path=output_zarr_path,
-            output_zarr_key=output_zarr_key,
-            beta=beta, block_shape=block_shape, halo=halo,
-            internal_solver=internal_solver, n_threads=n_threads,
-            use_2dws=use_2dws, ws_threshold=ws_threshold, ws_sigma=ws_sigma,
-            ws_zarr_path=ws_zarr_path, keep_watershed=keep_watershed,
-        )
-    else:
-        if output_path is None:
-            raise ValueError("--output is required in in-memory mode.")
-        return _run_in_memory(
-            ilp_path=ilp_path, rf=rf, channel_specs=channel_specs,
-            output_path=output_path, output_key=output_key,
-            beta=beta, block_shape=block_shape, halo=halo,
-            internal_solver=internal_solver, n_threads=n_threads,
-            use_2dws=use_2dws, ws_threshold=ws_threshold, ws_sigma=ws_sigma,
-        )
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Run elf's blockwise multicut using an ilastik-trained sklearn RF.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("--ilp", required=True)
-    parser.add_argument("--rf", required=True, help="Pickled sklearn RF (from fit_classifier.py)")
-    parser.add_argument(
-        "--channels", nargs="+", required=True, metavar="NAME:FILE",
-        help=(
-            'Channel specs, e.g. "Membrane Probabilities 0:/boundary.h5". '
-            "HDF5 files must contain exactly one dataset (auto-detected). "
-            "Channel names must match those in the .ilp FeatureNames group."
-        ),
-    )
-
-    # Output (in-memory mode)
-    parser.add_argument("--output", default=None, help="Output HDF5 file (in-memory mode)")
-    parser.add_argument("--output-key", default="/seg")
-
-    # Output (lazy mode)
-    parser.add_argument("--output-zarr", default=None, help="Output zarr path (lazy mode)")
-    parser.add_argument("--output-zarr-key", default="seg")
-
-    # Mode
-    parser.add_argument(
-        "--lazy", action="store_true",
-        help="Enable lazy blockwise mode for large (>RAM) volumes.",
-    )
-    parser.add_argument(
-        "--ws-zarr", default="watershed.zarr",
-        help=(
-            "Path for the watershed zarr (lazy mode, default: watershed.zarr). "
-            "If the zarr already exists with the correct shape it is reused and "
-            "the watershed step is skipped entirely."
-        ),
-    )
-    parser.add_argument(
-        "--keep-watershed", action=argparse.BooleanOptionalAction, default=True,
-        help="Keep the watershed zarr after the run (default: keep). "
-             "Pass --no-keep-watershed to delete it.",
-    )
-
-    # Multicut / watershed parameters
-    parser.add_argument("--beta", type=float, default=0.5)
-    parser.add_argument(
-        "--max-block-shape", type=int, nargs="+", default=[256, 256, 256], metavar="N",
-        help="Maximum block shape; actual shape may be slightly smaller to satisfy "
-             "checkerboard requirements (default: 256 256 256)",
-    )
-    parser.add_argument(
-        "--halo", type=int, nargs="+", default=[32, 32, 32], metavar="N",
-    )
-    parser.add_argument(
-        "--solver", default="kernighan-lin",
-        choices=["kernighan-lin", "greedy-additive", "greedy-fixation"],
-    )
-    parser.add_argument("--n-threads", type=int, default=8)
-    parser.add_argument("--use-2dws", action="store_true",
-                        help="Use stacked 2D watersheds (for anisotropic data)")
-    parser.add_argument("--ws-threshold", type=float, default=0.5)
-    parser.add_argument("--ws-sigma", type=float, default=2.0)
-
-    args = parser.parse_args()
-
-    run_blockwise_multicut(
-        ilp_path=args.ilp,
-        rf_path=args.rf,
-        channel_specs=args.channels,
-        output_path=args.output,
-        output_key=args.output_key,
-        output_zarr_path=args.output_zarr,
-        output_zarr_key=args.output_zarr_key,
-        lazy=args.lazy,
-        beta=args.beta,
-        block_shape=tuple(args.max_block_shape),
-        halo=tuple(args.halo),
-        internal_solver=args.solver,
-        n_threads=args.n_threads,
-        use_2dws=args.use_2dws,
-        ws_threshold=args.ws_threshold,
-        ws_sigma=args.ws_sigma,
-        ws_zarr_path=args.ws_zarr,
-        keep_watershed=args.keep_watershed,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -272,7 +272,7 @@ Blockwise / multicut:
                         (default: kernighan-lin)
 
 Classifier:
-  --n-estimators INT    Number of RF trees (default: 200)
+  --n-estimators INT    Number of RF trees (default: 100)
 
 Watershed:
   --use-2dws            Stacked 2D watersheds (for anisotropic data)
@@ -292,7 +292,7 @@ For more control, the two steps can be run independently.
 python fit_classifier.py \
     --ilp my_project.ilp \
     --output rf.pkl \
-    --n-estimators 200 \
+    --n-estimators 100 \
     --n-jobs 8
 # lane defaults to None → reads and concatenates all training crops
 ```

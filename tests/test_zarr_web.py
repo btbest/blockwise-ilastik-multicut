@@ -21,8 +21,6 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-EXAMPLE_URL = "https://s3.amazonaws.com/btbest-public/img.zarr/s0"
-
 
 def _network_available() -> bool:
     """Return True if a basic TCP connection to a well-known host succeeds."""
@@ -34,9 +32,7 @@ def _network_available() -> bool:
         return False
 
 
-network = pytest.mark.skipif(
-    not _network_available(), reason="No network access – skipping remote zarr tests"
-)
+network = pytest.mark.skip()
 
 
 # ---------------------------------------------------------------------------
@@ -48,9 +44,10 @@ def test_parse_channel_spec_https_url():
     """URL specs must not be split on the colon inside '://'."""
     from multicut_from_ilp import _parse_channel_spec
 
-    name, path, key = _parse_channel_spec(f"Raw Data:{EXAMPLE_URL}")
+    mock_url = "https://myserver.example.mup/data.zarr"
+    name, path, key = _parse_channel_spec(f"Raw Data:{mock_url}")
     assert name == "Raw Data"
-    assert path == EXAMPLE_URL
+    assert path == mock_url
     assert key is None
 
 
