@@ -588,23 +588,17 @@ def _ilastik_parallel_watershed(
             total=n_blocks, desc="  Watershed blocks",
         ))
 
-    # Apply cumulative offsets — same arithmetic as parallel_watershed, but
-    # our labels are already 0-indexed (0..max_k-1 per block) so the maths
-    # still works out: block k>0 adds cumsum[k-1], giving cumsum[k-1]..cumsum[k]-1.
-    # Block 0 needs no offset and already holds 0..max_0-1.
     cumulative = np.cumsum(per_block_max)
 
     def _add_offset(block_id):
-        if block_id == 0 or per_block_max[block_id] == 0:
-            return
-        blk      = blocking.getBlock(block_id)
-        inner_bb = tuple(slice(s, e) for s, e in zip(blk.begin, blk.end))
+        block      = blocking.getBlock(block_id)
+        inner_bb = tuple(slice(s, e) for s, e in zip(block.begin, block.end))
         output[inner_bb] = output[inner_bb] + np.uint64(cumulative[block_id - 1])
 
     with futures.ThreadPoolExecutor(n_threads) as tp:
         list(tqdm(
-            tp.map(_add_offset, range(n_blocks)),
-            total=n_blocks, desc="  Applying offsets",
+            tp.map(_add_offset, range(1, n_blocks)),
+            total=(n_blocks - 1), desc="  Applying offsets",
         ))
 
     max_id = int(cumulative[-1]) if n_blocks > 0 else 0
