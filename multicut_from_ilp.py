@@ -519,6 +519,7 @@ def _ilastik_parallel_watershed(
     from elf.segmentation.watershed import distance_transform_watershed
 
     ndim = len(vol_shape)
+    assert ndim in [2, 3], "Watershed segmentor will only work on 2D and 3D data"
     # These are ilastik's hard-coded defaults for 3-D data (block_shape=None,
     # halo=None paths in parallel_watershed / get_blocking).
     BLOCK_SHAPE = (128,) * ndim
@@ -1147,20 +1148,6 @@ def _run_lazy(
         del all_edges, all_costs_arr, keep
 
         print(f"  {len(edge_uvs)} unique edges after deduplication.", flush=True)
-
-        # Ensure the graph is large enough for every node ID that appears in
-        # the edges *or* the watershed zarr.  Old watershed zarrs (computed
-        # before the background-pixel fix) may contain labels == n_nodes due
-        # to empty blocks receiving an offset, making n_nodes off-by-one.
-        max_edge_node = int(edge_uvs.max()) + 1 if len(edge_uvs) > 0 else 0
-        graph_nodes = max(n_nodes, max_edge_node)
-        if graph_nodes != n_nodes:
-            warnings.warn(
-                f"Expanding graph from {n_nodes} to {graph_nodes} nodes "
-                f"to accommodate edge endpoints (max node ID in edges: "
-                f"{max_edge_node - 1}).  Consider deleting and recomputing "
-                f"the watershed zarr to avoid this."
-            )
 
         # --- Build global nifty graph ---
         print(f"Building global graph ({graph_nodes} nodes, {len(edge_uvs)} edges) …", flush=True)
