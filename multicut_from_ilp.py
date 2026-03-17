@@ -556,12 +556,29 @@ def _ilastik_parallel_watershed(
         # Same as ilastik: relabel the inner sub-block with vigra.labelMultiArray
         # so that labels are consecutive and disconnected fragments are separated.
         ws_inner = vigra.analysis.labelMultiArray(ws_outer[local_bb])
+
+        max_inner = int(ws_inner.max())
+        if max_inner == 0:
+            # All superpixels were removed (e.g. by min_size filter) — treat
+            # as empty so the offset phase doesn't produce bogus labels.
+            inner_shape = tuple(e - s for s, e in zip(block.innerBlock.begin, block.innerBlock.end))
+            output[inner_bb] = np.zeros(inner_shape, dtype=np.uint64)
+            return 0
+
         # Write 0-indexed: labelMultiArray gives 1..max_inner, subtract 1 so
         # block 0 occupies labels 0..max_0-1, block 1 will occupy max_0..max_0+max_1-1
         # after the offset phase, etc.  This means the zarr is ready to use
         # without any further relabeling step.
-        output[inner_bb] = ws_inner.astype(np.uint64) - np.uint64(1)
-        return int(ws_inner.max())
+        ws_arr = ws_inner.astype(np.uint64)
+        # Guard against background pixels (label 0) that would underflow to
+        # uint64_max when subtracting 1.  Assign them to the nearest
+        # foreground label (label 1 → 0-indexed 0) instead.
+        bg_mask = ws_arr == 0
+        if bg_mask.any():
+            ws_arr[bg_mask] = np.uint64(1)  # will become 0 after -1
+        ws_arr -= np.uint64(1)
+        output[inner_bb] = ws_arr
+        return max_inner
 
     print(f"  (ilastik-style: {BLOCK_SHAPE} blocks, halo={HALO[0]})")
     with futures.ThreadPoolExecutor(n_threads) as tp:
@@ -577,7 +594,7 @@ def _ilastik_parallel_watershed(
     cumulative = np.cumsum(per_block_max)
 
     def _add_offset(block_id):
-        if block_id == 0:
+        if block_id == 0 or per_block_max[block_id] == 0:
             return
         blk      = blocking.getBlock(block_id)
         inner_bb = tuple(slice(s, e) for s, e in zip(blk.begin, blk.end))
@@ -1027,7 +1044,7 @@ def _run_lazy(
 
         blocking = nt.blocking([0, 0, 0], list(vol_shape), list(block_shape))
         n_blocks = blocking.numberOfBlocks
-        print(f"Watershed complete: {n_nodes} superpixels across {n_blocks} blocks.")
+        print(f"Watershed complete: {n_nodes} superpixels across {n_blocks} blocks.", flush=True)
 
         # --- Blockwise feature computation ---
         # Accumulate edge arrays as numpy per block rather than building a Python
@@ -1117,10 +1134,24 @@ def _run_lazy(
         edge_costs = all_costs_arr[keep]
         del all_edges, all_costs_arr, keep
 
-        print(f"  {len(edge_uvs)} unique edges after deduplication.")
+        print(f"  {len(edge_uvs)} unique edges after deduplication.", flush=True)
+
+        # Validate edge endpoints before building the nifty graph — a node ID
+        # >= n_nodes would cause a C++ "vector subscript out of range" crash.
+        max_node = int(edge_uvs.max()) if len(edge_uvs) > 0 else 0
+        if max_node >= n_nodes:
+            bad = (edge_uvs[:, 0] >= n_nodes) | (edge_uvs[:, 1] >= n_nodes)
+            n_bad = int(bad.sum())
+            warnings.warn(
+                f"{n_bad} edges reference node IDs >= {n_nodes} "
+                f"(max seen: {max_node}); dropping them to avoid a nifty crash."
+            )
+            good = ~bad
+            edge_uvs   = edge_uvs[good]
+            edge_costs = edge_costs[good]
 
         # --- Build global nifty graph ---
-        print(f"Building global graph ({n_nodes} nodes, {len(edge_uvs)} edges) …")
+        print(f"Building global graph ({n_nodes} nodes, {len(edge_uvs)} edges) …", flush=True)
         graph = nifty.graph.undirectedGraph(n_nodes)
         graph.insertEdges(edge_uvs)
         del edge_uvs
@@ -1128,7 +1159,7 @@ def _run_lazy(
         # --- Blockwise multicut ---
         # ws_zarr_arr supports __getitem__ with slice tuples, which is all
         # blockwise_mc_impl needs (it calls segmentation[bb] per block).
-        print(f"Running blockwise multicut (block_shape={block_shape}, solver={internal_solver}) …")
+        print(f"Running blockwise multicut (block_shape={block_shape}, solver={internal_solver}) …", flush=True)
         # nifty's C++ getBlockWithHalo binding requires List[int], not tuple.
         halo_list = list(halo) if halo is not None else None
         node_labels = blockwise_multicut(
@@ -1156,6 +1187,11 @@ def _run_lazy(
             )
             # ws_zarr_arr is 0-indexed; index directly into node_labels.
             ws_block = np.array(ws_zarr_arr[inner_bb])
+            # Clamp any out-of-range labels (e.g. from background overflow) to 0
+            # so that node_labels indexing does not crash.
+            oob = ws_block >= len(node_labels)
+            if oob.any():
+                ws_block[oob] = 0
             seg_block = node_labels[ws_block]
             seg_out[inner_bb] = seg_block
 

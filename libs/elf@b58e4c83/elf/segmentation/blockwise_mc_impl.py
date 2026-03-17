@@ -19,6 +19,13 @@ def solve_subproblems(graph, costs, segmentation,
         bb = tuple(slice(beg, end) for beg, end in zip(block.begin, block.end))
         node_ids = np.unique(segmentation[bb])
 
+        # Guard: drop node IDs that are outside the graph (can happen when the
+        # watershed zarr contains stale background labels such as uint64-max).
+        n_graph_nodes = graph.numberOfNodes
+        valid = node_ids < n_graph_nodes
+        if not valid.all():
+            node_ids = node_ids[valid]
+
         # get the sub-graph corresponding to the nodes
         inner_edges, outer_edges = graph.extractSubgraphFromNodes(node_ids)
         sub_uvs = uv_ids[inner_edges]
