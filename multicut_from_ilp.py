@@ -209,11 +209,20 @@ class _Float32LazyArray:
 class _InvertedLazyArray:
     """Lazy wrapper that returns ``1 - block`` on every slice read.
 
-    Used when ``InvertPixelProbabilities`` is active: the boundary map is
-    stored as high-value = membrane, but elf's distance transform watershed
-    expects high-value = interior (i.e. the complement).  Only the watershed
-    input is inverted; the raw boundary values used for edge-feature
-    computation are left unchanged.
+    Used when ``InvertPixelProbabilities`` is active **and** the input
+    probability map has high-value = interior (i.e. it represents
+    *background* probability rather than *boundary* probability).
+
+    elf's ``distance_transform_watershed`` expects **high-value = boundary**:
+    it thresholds with ``input_ > threshold`` to find boundary foreground,
+    then computes a distance transform of the interior (background) pixels
+    to find seeds at the centres of interior regions.  When the input is
+    already high-value = boundary, no inversion is needed.  When the input
+    is high-value = interior (the opposite convention), this wrapper flips
+    the values so elf sees high-value = boundary.
+
+    Only the watershed input is inverted; the raw boundary values used for
+    edge-feature computation are left unchanged.
     """
 
     def __init__(self, arr):
@@ -960,6 +969,24 @@ def _run_lazy(
         boundary_lazy = _Float32LazyArray(lazy_arrays[boundary_channel])
         vol_shape = tuple(boundary_lazy.shape)
         print(f"Volume shape: {vol_shape}")
+
+        # --- Diagnostic: sample a small central patch to verify probability ---
+        # convention.  elf's distance_transform_watershed expects high values
+        # at boundaries; if the file instead stores P(background) the
+        # superpixels will be inverted (seeds at boundary peaks).
+        _diag_shape = tuple(min(s, 64) for s in vol_shape)
+        _diag_start = tuple((s - d) // 2 for s, d in zip(vol_shape, _diag_shape))
+        _diag_sl = tuple(slice(a, a + d) for a, d in zip(_diag_start, _diag_shape))
+        _diag_patch = np.asarray(boundary_lazy[_diag_sl], dtype=np.float32)
+        print(f"  Boundary probability sample (central {_diag_shape} patch):")
+        print(f"    min={_diag_patch.min():.4f}  max={_diag_patch.max():.4f}  "
+              f"mean={_diag_patch.mean():.4f}  fraction>{ws_threshold}={(_diag_patch > ws_threshold).mean():.3f}")
+        if _diag_patch.mean() > 0.5:
+            print(f"  WARNING: mean probability > 0.5 — if most of the volume is "
+                  f"interior, this may indicate the file stores P(background) "
+                  f"rather than P(boundary).  Consider passing --ws-invert or "
+                  f"re-exporting the boundary channel.")
+        del _diag_patch
 
         # Apply probability inversion for the watershed only (not for features).
         ws_input = _InvertedLazyArray(boundary_lazy) if ws_invert else boundary_lazy
