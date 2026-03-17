@@ -1170,11 +1170,6 @@ def _run_lazy(
             )
             # ws_zarr_arr is 0-indexed; index directly into node_labels.
             ws_block = np.array(ws_zarr_arr[inner_bb])
-            # Clamp any out-of-range labels (e.g. from background overflow) to 0
-            # so that node_labels indexing does not crash.
-            oob = ws_block >= len(node_labels)
-            if oob.any():
-                ws_block[oob] = 0
             seg_block = node_labels[ws_block]
             seg_out[inner_bb] = seg_block
 
