@@ -70,7 +70,7 @@ space, so no feature re-computation is needed for the re-fit step.
 
 ## Architecture
 
-### Training step (offline, runs on the `.ilp` file once)
+### Training step (runs on the `.ilp` file once)
 
 ```
 .ilp  (trained on N crops / lanes)
@@ -142,8 +142,8 @@ Three inputs are required:
 
 ```bash
 # Create and activate the conda environment (installs all dependencies)
-conda env create -f environment.yml
-conda activate blockwise-mc
+conda env create -n bmc -f environment.yml
+conda activate bmc
 
 # Install this package so the ilp-mc-block command is available
 pip install -e .
@@ -194,8 +194,7 @@ their names and maps them to the files you provide via `--raw` and
 | `ilp_mc_block.py` | **Main entrypoint**: full pipeline in one command (`ilp-mc-block`) |
 | `ilp_reader.py` | Read EdgeFeatures, EdgeLabelsDict, FeatureNames from `.ilp`; multi-lane aware |
 | `fit_classifier.py` | Re-fit a sklearn RF from all training crops; save as pickle |
-| `multicut_from_ilp.py` | Lower-level CLI: in-memory or lazy blockwise inference using a pre-fitted RF |
-| `multicut_from_ilp.ipynb` | Notebook: same pipeline, step-by-step with inspection utilities |
+| `multicut_from_ilp.py` | Lower-level, lazy blockwise inference using a pre-fitted RF |
 
 ---
 
@@ -228,8 +227,6 @@ ilp-mc-block \
     --raw raw.zarr \
     --probabilities boundary.zarr \
     --output-dir results/ \
-    --block-shape 256 256 256 \
-    --halo 32 32 32 \
     --beta 0.5 \
     --threads 8
 ```
@@ -239,18 +236,18 @@ ilp-mc-block \
 | File | Contents |
 |------|----------|
 | `raw_segmentation.zarr` | Final segmentation (uint64, zyx), named after `--raw` |
-| `rf.pkl` | Fitted sklearn classifier (reusable) |
+| `rf.pkl` | Fitted sklearn classifier |
 | `params.json` | Exact call parameters for reproducibility |
+| `raw_watershed.zarr` | Watershed superpixels (uint64, zyx), named after `--raw` |
 
 **Input formats** — both `--raw` and `--probabilities` accept:
 
 ```
 /path/to/file.zarr           local zarr store
-/path/to/file.zarr:s0        local zarr store, sub-key 's0'
-/path/to/file.h5:/data       HDF5 file with explicit dataset key
+/path/to/file.h5       HDF5 file with
 ```
 
-Volumes must be in **zyx axis order** and have the **same shape**.
+Volumes must be in **zyx(c) axis order** (singletong channel is ignored) and have the **same shape**.
 
 **All options:**
 
@@ -297,20 +294,7 @@ python fit_classifier.py \
 # lane defaults to None → reads and concatenates all training crops
 ```
 
-#### Step 2a — blockwise multicut in-memory (volumes that fit in RAM)
-
-```bash
-python multicut_from_ilp.py \
-    --ilp my_project.ilp \
-    --rf rf.pkl \
-    --channels "wsdt boundary channel:boundary.h5:/data" \
-               "Raw Data:raw.h5:/data" \
-    --output segmentation.h5 --output-key /seg \
-    --block-shape 256 256 256 --halo 32 32 32 \
-    --beta 0.5 --n-threads 8
-```
-
-#### Step 2b — blockwise multicut lazy mode (large volumes, e.g. 20 GB)
+#### Step 2 - blockwise multicut lazy mode (large volumes, e.g. 20 GB)
 
 ```bash
 python multicut_from_ilp.py \
@@ -329,9 +313,8 @@ The `--channels` argument maps each ilastik channel name (from `read_feature_nam
 to the corresponding file.  Channel names must exactly match the keys returned by
 `read_feature_names`.
 
-In lazy mode, disk space of `volume_shape × 8 bytes` is needed for the
-watershed tempfile (`--ws-tmp`). This file is deleted automatically on
-successful completion.
+Disk space of `volume_shape × 8 bytes` is needed for the
+watershed, in addition to the segmentation.
 
 ---
 
@@ -340,7 +323,7 @@ successful completion.
 - **Re-fit step**: negligible — reads DataFrames from HDF5 (one per crop).
 - **Lazy inference per block** (256³ + 32-voxel halo):
   - Input data: ~0.5–1 GB per block (float32, 2 channels)
-  - Watershed: stored on disk as a numpy memmap (uint64, ≈ 8× raw voxel count
+  - Watershed: stored as zarr (uint64, ≈ 8× raw voxel count
     in bytes); never fully in RAM
   - ilastikrag.Rag: only the block's superpixels are needed in RAM ✓
 - **Global edge dict**: all edge costs accumulated in a Python dict.
@@ -354,18 +337,6 @@ successful completion.
 
 ## Limitations and future work
 
-- **Feature space at inference must match training.** The stored `FeatureNames`
-  tells us exactly which ilastikrag features to compute. If the boundary
-  channel layout (number of channels, channel order) changes between the
-  `.ilp` training data and inference data, the channel mapping must be
-  updated accordingly.
-- **Watershed consistency.** The inference watershed is recomputed fresh for
-  new data. Using the same watershed parameters as ilastik (DT Watershed
-  applet settings) is recommended for best results; those parameters can be
-  read from `DT Watershed/` in the `.ilp` file.
 - **Out-of-core global graph assembly.** Currently the global superpixel graph
   is assembled in memory. For very large volumes (>10⁹ voxels) a disk-backed
   sparse representation (e.g. zarr-backed nifty graph) would be needed.
-- **Multi-lane `.ilp` files.** The current implementation targets single-lane
-  projects. Multi-lane support can be added by iterating over lanes in
-  `EdgeLabels{NNNN}` / `EdgeFeatures/{NNNN}`.
