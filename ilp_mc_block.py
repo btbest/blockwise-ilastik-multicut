@@ -140,6 +140,10 @@ def main():
     parser.add_argument(
         "--ws-invert", action="store_true", default=False,
         help="Invert the boundary probability map (p → 1-p) before running the watershed.  "
+             "Use this when the probability file stores P(background) / P(interior) "
+             "(high = interior) instead of P(boundary) (high = membrane).  "
+             "elf's distance_transform_watershed expects high = boundary; this flag "
+             "flips the values so that convention is met.  "
              "Equivalent to the 'Invert pixel probabilities' checkbox in ilastik's DT "
              "Watershed applet.  This setting is not stored in the .ilp file, so it must "
              "be set explicitly when needed.",
