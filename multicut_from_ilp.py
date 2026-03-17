@@ -186,6 +186,10 @@ class _Float32LazyArray:
     datasets and zarr arrays stored as float64 (or any other type) must be
     cast before being handed to elf / vigra.
 
+    Integer-typed arrays (e.g. uint8 with values in 0–255) are automatically
+    rescaled to [0, 1] so that downstream thresholds (typically 0.5) remain
+    meaningful.
+
     A trailing size-1 channel dimension (e.g. shape (Z, Y, X, 1)) is
     automatically stripped so the rest of the pipeline always sees a 3-D
     spatial array.
@@ -199,8 +203,19 @@ class _Float32LazyArray:
         self.dtype = np.dtype("float32")
         self.ndim = len(self.shape)
 
+        # If the source dtype is an integer type (e.g. uint8 0–255), we need
+        # to rescale to [0, 1] so that thresholds and blending weights work
+        # correctly.  Determine the scale factor once at init time.
+        src_dtype = np.dtype(arr.dtype)
+        if np.issubdtype(src_dtype, np.integer):
+            self._scale = np.float32(1.0 / np.iinfo(src_dtype).max)
+        else:
+            self._scale = None
+
     def __getitem__(self, key):
         data = np.asarray(self._arr[key], dtype=np.float32)
+        if self._scale is not None:
+            data *= self._scale
         if self._squeeze_channel and data.ndim == 4:
             data = data[..., 0]
         return data
