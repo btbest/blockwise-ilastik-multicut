@@ -540,8 +540,9 @@ def _ilastik_parallel_watershed(
         # Guard against empty / flat blocks to avoid NaN in elf's dt / dt.max().
         if not (data_block > ws_threshold).any():
             inner_shape = tuple(e - s for s, e in zip(block.innerBlock.begin, block.innerBlock.end))
-            output[inner_bb] = np.zeros(inner_shape, dtype=np.uint64)
-            return 0
+            # ilastik has 1 for completely empty blocks, with a unique ID for each empty block.
+            output[inner_bb] = np.ones(inner_shape, dtype=np.uint64)
+            return 1
 
         ws_outer, _ = distance_transform_watershed(
             data_block,
@@ -557,29 +558,8 @@ def _ilastik_parallel_watershed(
         # Same as ilastik: relabel the inner sub-block with vigra.labelMultiArray
         # so that labels are consecutive and disconnected fragments are separated.
         ws_inner = vigra.analysis.labelMultiArray(ws_outer[local_bb])
-
-        max_inner = int(ws_inner.max())
-        if max_inner == 0:
-            # All superpixels were removed (e.g. by min_size filter) — treat
-            # as empty so the offset phase doesn't produce bogus labels.
-            inner_shape = tuple(e - s for s, e in zip(block.innerBlock.begin, block.innerBlock.end))
-            output[inner_bb] = np.zeros(inner_shape, dtype=np.uint64)
-            return 0
-
-        # Write 0-indexed: labelMultiArray gives 1..max_inner, subtract 1 so
-        # block 0 occupies labels 0..max_0-1, block 1 will occupy max_0..max_0+max_1-1
-        # after the offset phase, etc.  This means the zarr is ready to use
-        # without any further relabeling step.
-        ws_arr = ws_inner.astype(np.uint64)
-        # Guard against background pixels (label 0) that would underflow to
-        # uint64_max when subtracting 1.  Assign them to the nearest
-        # foreground label (label 1 → 0-indexed 0) instead.
-        bg_mask = ws_arr == 0
-        if bg_mask.any():
-            ws_arr[bg_mask] = np.uint64(1)  # will become 0 after -1
-        ws_arr -= np.uint64(1)
-        output[inner_bb] = ws_arr
-        return max_inner
+        output[inner_bb] = ws_inner.astype(np.uint64)
+        return int(ws_inner.max())
 
     print(f"  (ilastik-style: {BLOCK_SHAPE} blocks, halo={HALO[0]})")
     with futures.ThreadPoolExecutor(n_threads) as tp:
@@ -1069,9 +1049,7 @@ def _run_lazy(
                 for s, e in zip(block.outerBlock.begin, block.outerBlock.end)
             )
 
-            # Read 0-indexed zarr block and convert to 1-indexed for ilastikrag
-            # (vigra treats 0 as background; our zarr uses 0 as first superpixel).
-            ws_block = np.array(ws_zarr_arr[outer_bb]) + np.uint64(1)
+            ws_block = ws_zarr_arr[outer_bb]  # Superpixels are already 1-indexed.
             channel_block = {
                 name: _Float32LazyArray(lazy_arrays[name])[outer_bb]
                 for name in feature_names
@@ -1126,7 +1104,15 @@ def _run_lazy(
         del all_edges, all_costs_arr, keep
 
         print(f"  {len(edge_uvs)} unique edges after deduplication.", flush=True)
-
+        max_edge_node = int(edge_uvs.max()) + 1 if len(edge_uvs) > 0 else 0
+        graph_nodes = max(n_nodes, max_edge_node)
+        if graph_nodes != n_nodes:
+            warnings.warn(
+                f"Watershed claims to have {n_nodes} superpixels, but graph had {graph_nodes} nodes. "
+                f"(max node ID in edges: "
+                f"{max_edge_node - 1}).  Consider deleting and recomputing "
+                f"the watershed zarr to avoid this."
+            )
         # --- Build global nifty graph ---
         print(f"Building global graph ({n_nodes} nodes, {len(edge_uvs)} edges) …", flush=True)
         graph = nifty.graph.undirectedGraph(n_nodes)
