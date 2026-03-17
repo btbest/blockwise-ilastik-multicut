@@ -980,7 +980,19 @@ def _run_lazy(
 ):
     import nifty
     import nifty.tools as nt
-    from elf.segmentation.multicut import blockwise_multicut, compute_edge_costs
+    from elf.segmentation.multicut import compute_edge_costs
+
+    # Import blockwise_mc_impl from our local patched copy rather than the
+    # installed elf package, so that the node-ID guard is always active.
+    import importlib.util as _ilu
+    _bmc_path = os.path.join(
+        os.path.dirname(__file__),
+        "libs", "elf@b58e4c83", "elf", "segmentation", "blockwise_mc_impl.py",
+    )
+    _bmc_spec = _ilu.spec_from_file_location("_local_blockwise_mc_impl", _bmc_path)
+    _bmc_mod  = _ilu.module_from_spec(_bmc_spec)
+    _bmc_spec.loader.exec_module(_bmc_mod)
+    _blockwise_mc_impl = _bmc_mod.blockwise_mc_impl
 
     try:
         import zarr
@@ -1136,23 +1148,23 @@ def _run_lazy(
 
         print(f"  {len(edge_uvs)} unique edges after deduplication.", flush=True)
 
-        # Validate edge endpoints before building the nifty graph — a node ID
-        # >= n_nodes would cause a C++ "vector subscript out of range" crash.
-        max_node = int(edge_uvs.max()) if len(edge_uvs) > 0 else 0
-        if max_node >= n_nodes:
-            bad = (edge_uvs[:, 0] >= n_nodes) | (edge_uvs[:, 1] >= n_nodes)
-            n_bad = int(bad.sum())
+        # Ensure the graph is large enough for every node ID that appears in
+        # the edges *or* the watershed zarr.  Old watershed zarrs (computed
+        # before the background-pixel fix) may contain labels == n_nodes due
+        # to empty blocks receiving an offset, making n_nodes off-by-one.
+        max_edge_node = int(edge_uvs.max()) + 1 if len(edge_uvs) > 0 else 0
+        graph_nodes = max(n_nodes, max_edge_node)
+        if graph_nodes != n_nodes:
             warnings.warn(
-                f"{n_bad} edges reference node IDs >= {n_nodes} "
-                f"(max seen: {max_node}); dropping them to avoid a nifty crash."
+                f"Expanding graph from {n_nodes} to {graph_nodes} nodes "
+                f"to accommodate edge endpoints (max node ID in edges: "
+                f"{max_edge_node - 1}).  Consider deleting and recomputing "
+                f"the watershed zarr to avoid this."
             )
-            good = ~bad
-            edge_uvs   = edge_uvs[good]
-            edge_costs = edge_costs[good]
 
         # --- Build global nifty graph ---
-        print(f"Building global graph ({n_nodes} nodes, {len(edge_uvs)} edges) …", flush=True)
-        graph = nifty.graph.undirectedGraph(n_nodes)
+        print(f"Building global graph ({graph_nodes} nodes, {len(edge_uvs)} edges) …", flush=True)
+        graph = nifty.graph.undirectedGraph(graph_nodes)
         graph.insertEdges(edge_uvs)
         del edge_uvs
 
@@ -1162,9 +1174,13 @@ def _run_lazy(
         print(f"Running blockwise multicut (block_shape={block_shape}, solver={internal_solver}) …", flush=True)
         # nifty's C++ getBlockWithHalo binding requires List[int], not tuple.
         halo_list = list(halo) if halo is not None else None
-        node_labels = blockwise_multicut(
+
+        # Resolve solver name → callable the same way elf's blockwise_multicut does.
+        from elf.segmentation.multicut import get_multicut_solver
+        internal_solver_fn = get_multicut_solver(internal_solver)
+        node_labels = _blockwise_mc_impl(
             graph, edge_costs, ws_zarr_arr,
-            internal_solver=internal_solver,
+            internal_solver=internal_solver_fn,
             block_shape=block_shape,
             n_threads=n_threads,
             halo=halo_list,
