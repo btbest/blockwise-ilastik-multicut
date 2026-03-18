@@ -250,27 +250,6 @@ class _InvertedLazyArray:
         return np.float32(1.0) - self._arr[key]
 
 
-def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None, **kwargs):
-    """Wraps elf's distance_transform_watershed, handling flat / empty blocks.
-
-    When a block contains no pixels above *threshold* (or when the resulting
-    distance transform is entirely zero), elf's internal normalisation step
-    ``dt / dt.max()`` produces NaN which propagates into vigra and ultimately
-    causes a dtype mis-match crash (uint64 += float64).  Return an all-zero
-    (background) segmentation immediately in that case.
-    """
-    from elf.segmentation.watershed import distance_transform_watershed
-
-    # Use the masked region if a mask is provided, otherwise the full block.
-    effective = input_ if mask is None else input_[mask]
-    if effective.size == 0 or not (effective > threshold).any():
-        return np.zeros(input_.shape, dtype="uint64"), 0
-
-    return distance_transform_watershed(
-        input_, threshold=threshold, sigma_seeds=sigma_seeds, mask=mask, **kwargs
-    )
-
-
 def _bigintprod(nums) -> int:
     """Product of an iterable using pure-Python integers.
 
