@@ -16,6 +16,34 @@ from ilp_reader import read_feature_names
 # Helpers
 # ---------------------------------------------------------------------------
 
+_OME_ZARR_ATTRS = {
+    "multiscales": [{
+        "version": "0.4",
+        "axes": [
+            {"name": "z", "type": "space"},
+            {"name": "y", "type": "space"},
+            {"name": "x", "type": "space"},
+        ],
+        "datasets": [{
+            "path": "s0",
+            "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0]}],
+        }],
+    }]
+}
+
+
+def _create_ome_zarr(path, shape, dtype, chunks):
+    """Create a minimal OME-Zarr 0.4 store at *path* and return the s0 array.
+
+    Creates a zarr group at *path*, writes OME-Zarr 0.4 multiscales metadata
+    to the group's attributes, and creates the data array at sub-path "s0".
+    Returns the array so callers can write into it directly.
+    """
+    import zarr
+    group = zarr.open_group(path, mode="w")
+    group.attrs.update(_OME_ZARR_ATTRS)
+    return group.require_dataset("s0", shape=shape, dtype=dtype, chunks=chunks, exact=True, dimension_separator="/")
+
 def _ensure_even_block_count(vol_shape, block_shape):
     """Return a (possibly reduced) block_shape whose total block count is even.
 
@@ -123,17 +151,7 @@ def _open_channel_lazy(path: str, key: str | None):
                     "Install it with: pip install fsspec aiohttp"
                 ) from exc
             mapper = fsspec.get_mapper(path)
-            try:
-                store = zarr.open(mapper, mode="r")
-            except Exception:
-                # zarr ≥3 probes zarr.json first (v3 format); the remote array
-                # may be zarr v2 which stores metadata in .zarray instead.
-                # Retry with an explicit v2 format request.
-                zarr_major = int(zarr.__version__.split(".")[0])
-                if zarr_major >= 3:
-                    store = zarr.open(mapper, mode="r", zarr_format=2)
-                else:
-                    store = zarr.open(mapper, mode="r", zarr_version=2)
+            store = zarr.open(mapper, mode="r")
         else:
             store = zarr.open(path, mode="r")
 
@@ -611,7 +629,8 @@ def _open_or_compute_watershed_zarr(
     # --- Try to reuse an existing watershed zarr ---
     if os.path.exists(ws_zarr_path):
         try:
-            existing = zarr.open(ws_zarr_path, mode="r")
+            existing_group = zarr.open_group(ws_zarr_path, mode="r")
+            existing = existing_group["s0"]
             if (
                 tuple(existing.shape) == tuple(vol_shape)
                 and "n_superpixels" in existing.attrs
@@ -637,9 +656,8 @@ def _open_or_compute_watershed_zarr(
         # Blocks are independent and produce globally consecutive 0-indexed labels,
         # so we can write directly into the zarr — no memmap or relabeling needed.
         ndim = len(vol_shape)
-        ws_zarr_arr = zarr.open(
-            ws_zarr_path, mode="w",
-            shape=vol_shape, dtype="uint64",
+        ws_zarr_arr = _create_ome_zarr(
+            ws_zarr_path, shape=vol_shape, dtype="uint64",
             chunks=(128,) * ndim,   # must match _ilastik_parallel_watershed's BLOCK_SHAPE
         )
         _, n_superpixels = _ilastik_parallel_watershed(
@@ -689,9 +707,8 @@ def _open_or_compute_watershed_zarr(
         else:
             raise ValueError(f"Unknown ws_method {ws_method!r}; choose 'ilastik', 'two-pass', or '2d'.")
 
-        ws_zarr_arr = zarr.open(
-            ws_zarr_path, mode="w",
-            shape=vol_shape, dtype="uint64",
+        ws_zarr_arr = _create_ome_zarr(
+            ws_zarr_path, shape=vol_shape, dtype="uint64",
             chunks=block_shape,
         )
         n_superpixels = _relabel_and_write_zarr(
@@ -1105,9 +1122,8 @@ def _run_lazy(
 
         # --- Blockwise pixel projection → zarr ---
         print(f"Projecting labels and writing segmentation to {output_zarr_path} …")
-        seg_out = zarr.open(
-            output_zarr_path, mode="w",
-            shape=vol_shape, dtype="uint64",
+        seg_out = _create_ome_zarr(
+            output_zarr_path, shape=vol_shape, dtype="uint64",
             chunks=block_shape,
         )
         for block_id in range(n_blocks):

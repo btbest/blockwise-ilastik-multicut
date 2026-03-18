@@ -1,6 +1,5 @@
-name: blockwise-mc
+name: blimp
 channels:
-  - ilastik-forge/label/patched-2
   - ilastik-forge
   - conda-forge
   - nodefaults
@@ -14,7 +13,7 @@ dependencies:
   - scikit-learn<=1.6.1
   - scikit-image
   - h5py
-  - zarr>=2,<4
+  - zarr 2.*
   - fsspec
   - aiohttp
   - pandas>=2
