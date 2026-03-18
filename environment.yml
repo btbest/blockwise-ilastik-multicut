@@ -1,6 +1,5 @@
-name: blockwise-mc
+name: blimp
 channels:
-  - ilastik-forge/label/patched-2
   - ilastik-forge
   - conda-forge
   - nodefaults
