@@ -1076,7 +1076,10 @@ def _run_lazy(
             f"Watershed claims to have {n_superpixels} superpixels, but "
             f"max node ID in edges is {max_edge_node}."
         )
-        n_nodes = n_superpixels
+        # ws_zarr_arr contains 1-indexed labels (1…n_superpixels).
+        # nifty graph needs one extra node for a non-existent "background" superpixels (ID=0),
+        # because this is what blockwise_multicut expects
+        n_nodes = n_superpixels + 1
         # --- Build global nifty graph ---
         print(f"Building global graph ({n_nodes} nodes, {len(edge_uvs)} edges) …")
         graph = nifty.graph.undirectedGraph(n_nodes)
