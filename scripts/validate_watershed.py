@@ -87,21 +87,37 @@ def _label_sizes(vol: np.ndarray) -> dict[int, int]:
     return dict(zip(labels.tolist(), counts.tolist()))
 
 
-def _contingency_matrix(a: np.ndarray, b: np.ndarray):
-    """Build a sparse contingency matrix between flat label arrays *a* and *b*.
+_CHUNK = 128  # z-slices per chunk for blockwise operations
 
-    Returns (row_ids, col_ids, counts) where row_ids index into labels of *a*
-    and col_ids index into labels of *b*.
+
+def _overlap_maps_blockwise(a: np.ndarray, b: np.ndarray):
+    """Build overlap mappings a→b and b→a by processing z-slices in chunks.
+
+    Returns (a_to_b, b_to_a) where each is a dict mapping a label to the set
+    of labels it overlaps with in the other volume.  Never materialises a full
+    Python list of voxel pairs — keeps memory proportional to the number of
+    unique (label_a, label_b) pairs, not the number of voxels.
     """
-    from collections import Counter
+    from collections import defaultdict
 
-    pairs = Counter(zip(a.ravel().tolist(), b.ravel().tolist()))
-    rows, cols, counts = [], [], []
-    for (r, c), n in pairs.items():
-        rows.append(r)
-        cols.append(c)
-        counts.append(n)
-    return np.array(rows), np.array(cols), np.array(counts)
+    a_to_b: dict[int, set[int]] = defaultdict(set)
+    b_to_a: dict[int, set[int]] = defaultdict(set)
+
+    n_slices = a.shape[0]
+    for z0 in range(0, n_slices, _CHUNK):
+        z1 = min(z0 + _CHUNK, n_slices)
+        a_chunk = a[z0:z1].ravel()
+        b_chunk = b[z0:z1].ravel()
+        # Stack into (N, 2) and find unique pairs — pure numpy, no .tolist().
+        pairs = np.unique(
+            np.column_stack((a_chunk, b_chunk)), axis=0
+        )
+        for row in pairs:
+            la, lb = int(row[0]), int(row[1])
+            a_to_b[la].add(lb)
+            b_to_a[lb].add(la)
+
+    return a_to_b, b_to_a
 
 
 def _is_pure_relabeling(a: np.ndarray, b: np.ndarray) -> tuple[bool, dict | None]:
@@ -109,17 +125,10 @@ def _is_pure_relabeling(a: np.ndarray, b: np.ndarray) -> tuple[bool, dict | None
 
     Returns (True, mapping_a_to_b) if every label in *a* maps to exactly one
     label in *b* and vice-versa, otherwise (False, None).
+
+    Operates blockwise over z-slices to stay memory-friendly on large volumes.
     """
-    rows, cols, counts = _contingency_matrix(a, b)
-
-    # For each label in a, check it maps to exactly one label in b.
-    from collections import defaultdict
-
-    a_to_b: dict[int, set[int]] = defaultdict(set)
-    b_to_a: dict[int, set[int]] = defaultdict(set)
-    for r, c in zip(rows.tolist(), cols.tolist()):
-        a_to_b[r].add(c)
-        b_to_a[c].add(r)
+    a_to_b, b_to_a = _overlap_maps_blockwise(a, b)
 
     mapping = {}
     for label_a, targets in a_to_b.items():
@@ -165,23 +174,23 @@ def _worst_slices(per_slice: np.ndarray, n: int = 5) -> list[tuple[int, float]]:
     return result
 
 
-def _split_merge_analysis(a: np.ndarray, b: np.ndarray):
+def _split_merge_analysis(a: np.ndarray, b: np.ndarray, *,
+                          _cached_maps=None):
     """Identify labels that were split or merged between *a* and *b*.
 
     A label in *a* is "split" if it overlaps with more than one label in *b*.
     A label in *b* is "merged" if it receives voxels from more than one label in *a*.
 
+    Pass *_cached_maps* = (a_to_b, b_to_a) to reuse overlap maps from a
+    previous ``_overlap_maps_blockwise`` call.
+
     Returns (splits, merges) where each is a dict mapping a label to the set
     of labels in the other volume it overlaps with.
     """
-    rows, cols, _ = _contingency_matrix(a, b)
-    from collections import defaultdict
-
-    a_to_b: dict[int, set[int]] = defaultdict(set)
-    b_to_a: dict[int, set[int]] = defaultdict(set)
-    for r, c in zip(rows.tolist(), cols.tolist()):
-        a_to_b[r].add(c)
-        b_to_a[c].add(r)
+    if _cached_maps is not None:
+        a_to_b, b_to_a = _cached_maps
+    else:
+        a_to_b, b_to_a = _overlap_maps_blockwise(a, b)
 
     splits = {k: v for k, v in a_to_b.items() if len(v) > 1}
     merges = {k: v for k, v in b_to_a.items() if len(v) > 1}
@@ -332,8 +341,21 @@ def validate(ours_path: str, ref_path: str, *,
     print(f"  Differing voxels: {n_diff:,} / {n_total:,}  ({pct:.4f}%)\n")
 
     # -- 6. Relabeling check -----------------------------------------------
-    print("  Checking if difference is just a relabeling …")
-    is_relabel, mapping = _is_pure_relabeling(ours, ref)
+    print("  Checking if difference is just a relabeling …", flush=True)
+    a_to_b, b_to_a = _overlap_maps_blockwise(ours, ref)
+    # Check bijectivity from the cached maps.
+    is_relabel = True
+    mapping: dict[int, int] = {}
+    for label_a, targets in a_to_b.items():
+        if len(targets) != 1:
+            is_relabel = False
+            break
+        target = next(iter(targets))
+        if len(b_to_a[target]) != 1:
+            is_relabel = False
+            break
+        mapping[label_a] = target
+
     if is_relabel:
         print("  ** The volumes are a bijective relabeling of each other **")
         print("     (same topology, different label IDs)")
@@ -345,7 +367,8 @@ def validate(ours_path: str, ref_path: str, *,
     # -- 7. Split / merge analysis -----------------------------------------
     if not is_relabel:
         print("  Split / merge analysis:")
-        splits, merges = _split_merge_analysis(ours, ref)
+        splits, merges = _split_merge_analysis(ours, ref,
+                                               _cached_maps=(a_to_b, b_to_a))
         print(f"    Labels in ours split across multiple ref labels: {len(splits)}")
         print(f"    Labels in ref receiving from multiple ours labels: {len(merges)}")
         if splits:
