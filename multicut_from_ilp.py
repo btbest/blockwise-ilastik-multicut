@@ -250,27 +250,6 @@ class _InvertedLazyArray:
         return np.float32(1.0) - self._arr[key]
 
 
-def _safe_distance_transform_watershed(input_, threshold, sigma_seeds, mask=None, **kwargs):
-    """Wraps elf's distance_transform_watershed, handling flat / empty blocks.
-
-    When a block contains no pixels above *threshold* (or when the resulting
-    distance transform is entirely zero), elf's internal normalisation step
-    ``dt / dt.max()`` produces NaN which propagates into vigra and ultimately
-    causes a dtype mis-match crash (uint64 += float64).  Return an all-zero
-    (background) segmentation immediately in that case.
-    """
-    from elf.segmentation.watershed import distance_transform_watershed
-
-    # Use the masked region if a mask is provided, otherwise the full block.
-    effective = input_ if mask is None else input_[mask]
-    if effective.size == 0 or not (effective > threshold).any():
-        return np.zeros(input_.shape, dtype="uint64"), 0
-
-    return distance_transform_watershed(
-        input_, threshold=threshold, sigma_seeds=sigma_seeds, mask=mask, **kwargs
-    )
-
-
 def _bigintprod(nums) -> int:
     """Product of an iterable using pure-Python integers.
 
@@ -506,11 +485,11 @@ def _ilastik_parallel_watershed(
     ws_pixel_pitch: list[float] | None
     ws_apply_nonmax : bool
     n_threads     : int
-    output        : np.memmap         – pre-allocated uint64 memmap (same shape)
+    output        : zarr.Array        - to write results into
 
     Returns
     -------
-    (output, max_id) : the filled memmap and the maximum label value
+    (output, max_id) : the filled array and the maximum label value
     """
     import nifty.tools as nt
     import vigra
@@ -519,6 +498,7 @@ def _ilastik_parallel_watershed(
     from elf.segmentation.watershed import distance_transform_watershed
 
     ndim = len(vol_shape)
+    assert ndim in [2, 3], "Watershed segmentor will only work on 2D and 3D data"
     # These are ilastik's hard-coded defaults for 3-D data (block_shape=None,
     # halo=None paths in parallel_watershed / get_blocking).
     BLOCK_SHAPE = (128,) * ndim
@@ -526,7 +506,8 @@ def _ilastik_parallel_watershed(
 
     blocking = nt.blocking([0] * ndim, list(vol_shape), list(BLOCK_SHAPE))
     n_blocks  = blocking.numberOfBlocks
-    per_block_max = np.zeros(n_blocks, dtype=np.int64)
+    # The returned watershed has 1-indexed superpixel IDs! There is no 0-superpixel.
+    per_block_max = np.ones(n_blocks, dtype=np.int64)
 
     def _run_block(block_id):
         block      = blocking.getBlockWithHalo(block_id, HALO)
@@ -539,8 +520,9 @@ def _ilastik_parallel_watershed(
         # Guard against empty / flat blocks to avoid NaN in elf's dt / dt.max().
         if not (data_block > ws_threshold).any():
             inner_shape = tuple(e - s for s, e in zip(block.innerBlock.begin, block.innerBlock.end))
-            output[inner_bb] = np.zeros(inner_shape, dtype=np.uint64)
-            return 0
+            # ilastik has 1 for completely empty blocks, with a unique ID for each empty block.
+            output[inner_bb] = np.ones(inner_shape, dtype=np.uint64)
+            return 1
 
         ws_outer, _ = distance_transform_watershed(
             data_block,
@@ -556,11 +538,7 @@ def _ilastik_parallel_watershed(
         # Same as ilastik: relabel the inner sub-block with vigra.labelMultiArray
         # so that labels are consecutive and disconnected fragments are separated.
         ws_inner = vigra.analysis.labelMultiArray(ws_outer[local_bb])
-        # Write 0-indexed: labelMultiArray gives 1..max_inner, subtract 1 so
-        # block 0 occupies labels 0..max_0-1, block 1 will occupy max_0..max_0+max_1-1
-        # after the offset phase, etc.  This means the zarr is ready to use
-        # without any further relabeling step.
-        output[inner_bb] = ws_inner.astype(np.uint64) - np.uint64(1)
+        output[inner_bb] = ws_inner.astype(np.uint64)
         return int(ws_inner.max())
 
     print(f"  (ilastik-style: {BLOCK_SHAPE} blocks, halo={HALO[0]})")
@@ -570,23 +548,17 @@ def _ilastik_parallel_watershed(
             total=n_blocks, desc="  Watershed blocks",
         ))
 
-    # Apply cumulative offsets — same arithmetic as parallel_watershed, but
-    # our labels are already 0-indexed (0..max_k-1 per block) so the maths
-    # still works out: block k>0 adds cumsum[k-1], giving cumsum[k-1]..cumsum[k]-1.
-    # Block 0 needs no offset and already holds 0..max_0-1.
     cumulative = np.cumsum(per_block_max)
 
     def _add_offset(block_id):
-        if block_id == 0:
-            return
-        blk      = blocking.getBlock(block_id)
-        inner_bb = tuple(slice(s, e) for s, e in zip(blk.begin, blk.end))
+        block      = blocking.getBlock(block_id)
+        inner_bb = tuple(slice(s, e) for s, e in zip(block.begin, block.end))
         output[inner_bb] = output[inner_bb] + np.uint64(cumulative[block_id - 1])
 
     with futures.ThreadPoolExecutor(n_threads) as tp:
         list(tqdm(
-            tp.map(_add_offset, range(n_blocks)),
-            total=n_blocks, desc="  Applying offsets",
+            tp.map(_add_offset, range(1, n_blocks)),
+            total=(n_blocks - 1), desc="  Applying offsets",
         ))
 
     max_id = int(cumulative[-1]) if n_blocks > 0 else 0
@@ -644,12 +616,12 @@ def _open_or_compute_watershed_zarr(
                 tuple(existing.shape) == tuple(vol_shape)
                 and "n_superpixels" in existing.attrs
             ):
-                n_nodes = int(existing.attrs["n_superpixels"])
+                n_superpixels = int(existing.attrs["n_superpixels"])
                 print(
                     f"Reusing existing watershed zarr: {ws_zarr_path} "
-                    f"({n_nodes} superpixels) — skipping computation"
+                    f"({n_superpixels} superpixels) — skipping computation"
                 )
-                return existing, n_nodes
+                return existing, n_superpixels
             print(
                 f"  Existing {ws_zarr_path!r} has wrong shape or missing "
                 f"attribute, recomputing …"
@@ -670,15 +642,15 @@ def _open_or_compute_watershed_zarr(
             shape=vol_shape, dtype="uint64",
             chunks=(128,) * ndim,   # must match _ilastik_parallel_watershed's BLOCK_SHAPE
         )
-        _, n_nodes = _ilastik_parallel_watershed(
+        _, n_superpixels = _ilastik_parallel_watershed(
             boundary_lazy, vol_shape,
             ws_threshold, ws_sigma, ws_min_size, ws_alpha,
             ws_pixel_pitch, ws_apply_nonmax,
             n_threads, ws_zarr_arr,
         )
-        ws_zarr_arr.attrs["n_superpixels"] = n_nodes
-        print(f"  Watershed zarr written to {ws_zarr_path} ({n_nodes} superpixels)")
-        return ws_zarr_arr, n_nodes
+        ws_zarr_arr.attrs["n_superpixels"] = n_superpixels
+        print(f"  Watershed zarr written to {ws_zarr_path} ({n_superpixels} superpixels)")
+        return ws_zarr_arr, n_superpixels
 
     # --- two-pass and 2d methods: compute into a temporary memmap, then
     #     relabel (labels are sparse / non-consecutive) and write to zarr ---
@@ -722,11 +694,11 @@ def _open_or_compute_watershed_zarr(
             shape=vol_shape, dtype="uint64",
             chunks=block_shape,
         )
-        n_nodes = _relabel_and_write_zarr(
+        n_superpixels = _relabel_and_write_zarr(
             ws_memmap, ws_zarr_arr, vol_shape, block_shape, n_threads
         )
-        ws_zarr_arr.attrs["n_superpixels"] = n_nodes
-        print(f"  Watershed zarr written to {ws_zarr_path} ({n_nodes} superpixels)")
+        ws_zarr_arr.attrs["n_superpixels"] = n_superpixels
+        print(f"  Watershed zarr written to {ws_zarr_path} ({n_superpixels} superpixels)")
 
     finally:
         del ws_memmap
@@ -737,7 +709,7 @@ def _open_or_compute_watershed_zarr(
                 f"Could not remove watershed temp file {_memmap_path!r}: {_e}"
             )
 
-    return ws_zarr_arr, n_nodes
+    return ws_zarr_arr, n_superpixels
 
 
 # ---------------------------------------------------------------------------
@@ -905,20 +877,10 @@ def compute_ilastikrag_features(
     """
     import pandas as pd
 
-    unique_labels = np.unique(superpixels)
-    # ilastikrag treats 0 as background; exclude it from the label count.
-    n_fg_labels = int((unique_labels > 0).sum())
-    if n_fg_labels < 2:
-        raise ValueError(
-            f"Block has only {n_fg_labels} foreground superpixel label(s) "
-            f"(unique: {unique_labels.tolist()[:10]}); no edges to compute."
-        )
-
-    # ilastikrag's C++ layer crashes on a 2-node RAG (exactly 1 edge), which is
-    # a valid configuration when a single membrane bisects the block.  Use a
-    # pure-numpy fallback in that case.
-    if n_fg_labels == 2:
-        return _compute_features_two_sp(superpixels, channel_data, feature_names)
+    if len(np.unique(superpixels)) < 2:
+        # Only one superpixel - no edges. Should never happen with ilastik_parallel_watershed
+        # because the halo always contains superpixels from other blocks.
+        return None, None
 
     import ilastikrag
     import vigra
@@ -962,13 +924,9 @@ def _run_lazy(
     keep_watershed=True,
 ):
     import nifty
+    import zarr
     import nifty.tools as nt
     from elf.segmentation.multicut import blockwise_multicut, compute_edge_costs
-
-    try:
-        import zarr
-    except ImportError:
-        raise ImportError("zarr is required for lazy mode: conda install -c conda-forge zarr")
 
     feature_names = read_feature_names(ilp_path)
 
@@ -1007,7 +965,7 @@ def _run_lazy(
         ws_input = _InvertedLazyArray(boundary_lazy) if ws_invert else boundary_lazy
 
         # --- Blockwise watershed: reuse existing zarr or compute fresh ---
-        ws_zarr_arr, n_nodes = _open_or_compute_watershed_zarr(
+        ws_zarr_arr, n_superpixels = _open_or_compute_watershed_zarr(
             ws_zarr_path=ws_zarr_path,
             boundary_lazy=ws_input,
             vol_shape=vol_shape,
@@ -1022,12 +980,10 @@ def _run_lazy(
             ws_apply_nonmax=ws_apply_nonmax,
             n_threads=n_threads,
         )
-        # ws_zarr_arr contains 0-indexed labels (0…n_nodes-1).
-        # n_nodes is the number of superpixels = nifty graph node count.
 
         blocking = nt.blocking([0, 0, 0], list(vol_shape), list(block_shape))
         n_blocks = blocking.numberOfBlocks
-        print(f"Watershed complete: {n_nodes} superpixels across {n_blocks} blocks.")
+        print(f"Watershed complete: {n_superpixels} superpixels across {n_blocks} blocks.")
 
         # --- Blockwise feature computation ---
         # Accumulate edge arrays as numpy per block rather than building a Python
@@ -1061,21 +1017,17 @@ def _run_lazy(
                 for s, e in zip(block.outerBlock.begin, block.outerBlock.end)
             )
 
-            # Read 0-indexed zarr block and convert to 1-indexed for ilastikrag
-            # (vigra treats 0 as background; our zarr uses 0 as first superpixel).
-            ws_block = np.array(ws_zarr_arr[outer_bb]) + np.uint64(1)
+            ws_block = ws_zarr_arr[outer_bb]  # Superpixels are already 1-indexed.
             channel_block = {
                 name: _Float32LazyArray(lazy_arrays[name])[outer_bb]
                 for name in feature_names
             }
 
-            # Pass 1-indexed ws_block to ilastikrag (vigra treats 0 as background)
-            try:
-                features, edge_ids = compute_ilastikrag_features(
-                    ws_block, channel_block, feature_names
-                )
-            except ValueError:
-                # Block has < 2 foreground superpixel labels → no edges; skip.
+            features, edge_ids = compute_ilastikrag_features(
+                ws_block, channel_block, feature_names
+            )
+            if features is None or edge_ids is None:
+                # Block has < 2 superpixel labels → no edges; skip.
                 continue
 
             probs = rf.predict_proba(features)[:, split_col]
@@ -1099,7 +1051,7 @@ def _run_lazy(
         all_costs_arr = np.concatenate(all_costs_list, axis=0)  # (M,)   float32
         del all_edges_list, all_costs_list
 
-        key = all_edges[:, 0] * np.uint64(n_nodes + 1) + all_edges[:, 1]
+        key = all_edges[:, 0] * np.uint64(n_superpixels) + all_edges[:, 1]
         order = np.argsort(key, kind="stable")
         key           = key[order]
         all_edges     = all_edges[order]
@@ -1112,13 +1064,22 @@ def _run_lazy(
         keep[:-1] = key[:-1] != key[1:]
         del key
 
-        # Shift 1-indexed edge endpoints back to 0-indexed (zarr convention).
-        edge_uvs  = all_edges[keep].astype(np.uint64) - np.uint64(1)
+        edge_uvs  = all_edges[keep].astype(np.uint64)
         edge_costs = all_costs_arr[keep]
+        assert len(edge_uvs) > 0, f"Deduplication eradicated all edges? All: {all_edges}"
         del all_edges, all_costs_arr, keep
 
         print(f"  {len(edge_uvs)} unique edges after deduplication.")
 
+        max_edge_node = int(edge_uvs.max())  # Node IDs should be 1-indexed like superpixels
+        assert max_edge_node == n_superpixels, (
+            f"Watershed claims to have {n_superpixels} superpixels, but "
+            f"max node ID in edges is {max_edge_node}."
+        )
+        # ws_zarr_arr contains 1-indexed labels (1…n_superpixels).
+        # nifty graph needs one extra node for a non-existent "background" superpixels (ID=0),
+        # because this is what blockwise_multicut expects
+        n_nodes = n_superpixels + 1
         # --- Build global nifty graph ---
         print(f"Building global graph ({n_nodes} nodes, {len(edge_uvs)} edges) …")
         graph = nifty.graph.undirectedGraph(n_nodes)
@@ -1154,7 +1115,9 @@ def _run_lazy(
             inner_bb = tuple(
                 slice(s, e) for s, e in zip(block.begin, block.end)
             )
-            # ws_zarr_arr is 0-indexed; index directly into node_labels.
+            # node_labels indices of course start at 0, while superpixel IDs start at 1.
+            # edges should be referencing superpixel IDs though, so the extra node we
+            # inserted earlier should have become the (unconnected) 0-node automatically.
             ws_block = np.array(ws_zarr_arr[inner_bb])
             seg_block = node_labels[ws_block]
             seg_out[inner_bb] = seg_block
