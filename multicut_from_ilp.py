@@ -42,7 +42,7 @@ def _create_ome_zarr(path, shape, dtype, chunks):
     import zarr
     group = zarr.open_group(path, mode="w")
     group.attrs.update(_OME_ZARR_ATTRS)
-    return group.require_dataset("s0", shape=shape, dtype=dtype, chunks=chunks, exact=True)
+    return group.require_dataset("s0", shape=shape, dtype=dtype, chunks=chunks, exact=True, dimension_separator="/")
 
 def _ensure_even_block_count(vol_shape, block_shape):
     """Return a (possibly reduced) block_shape whose total block count is even.
