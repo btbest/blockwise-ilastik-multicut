@@ -1,15 +1,22 @@
 #!/usr/bin/env python
-"""Compare watershed superpixels from ilp-mc-block against ilastik reference.
+"""Compare label volumes from ilp-mc-block against ilastik reference.
 
-Reads two label volumes (h5 or zarr), checks whether they are pixel-identical,
-and if not, produces a detailed diagnostic report showing *where* and *how*
-they differ.
+Works for both watershed superpixels and final multicut segmentation.
+Use --mode to set expectations:
+
+  watershed (default):  expect pixel-identical labels
+  segmentation:         expect same topology (bijective relabeling is OK)
+
+Reads two label volumes (h5 or zarr), runs the appropriate checks, and if
+the volumes differ, produces a detailed diagnostic report showing *where*
+and *how* they differ.
 
 Usage
 -----
     python scripts/validate_watershed.py ours.zarr reference.h5
-    python scripts/validate_watershed.py ours.zarr reference.h5 --save-diff diff.zarr
-    python scripts/validate_watershed.py ours.zarr reference.h5 --slices 50 100 150
+    python scripts/validate_watershed.py ours.zarr ref.h5 --mode segmentation
+    python scripts/validate_watershed.py ours.zarr ref.h5 --save-diff diff.zarr
+    python scripts/validate_watershed.py ours.zarr ref.h5 --slices 50 100 150
 
 Supports .h5/.hdf5 (reads the first dataset) and .zarr volumes.
 A trailing singleton channel axis (zyxc with c == 1) is automatically removed.
@@ -233,18 +240,25 @@ def _save_slice_images(a: np.ndarray, b: np.ndarray, diff_mask: np.ndarray,
 # ---------------------------------------------------------------------------
 
 def validate(ours_path: str, ref_path: str, *,
+             mode: str = "watershed",
              save_diff: str | None = None,
              slices: list[int] | None = None,
              slice_dir: str | None = None,
              top_n_slices: int = 10):
-    """Run full validation and print a report."""
+    """Run full validation and print a report.
+
+    *mode* controls what counts as success:
+      ``"watershed"``     — pixel-identical labels required
+      ``"segmentation"``  — bijective relabeling (same topology) is sufficient
+    """
     print("Loading volumes …")
     ours = _load_volume(ours_path)
     ref = _load_volume(ref_path)
 
+    title = "WATERSHED" if mode == "watershed" else "SEGMENTATION"
     sep = "=" * 72
     print(f"\n{sep}")
-    print("  WATERSHED VALIDATION REPORT")
+    print(f"  {title} VALIDATION REPORT")
     print(f"{sep}\n")
 
     # -- 1. Shape ----------------------------------------------------------
@@ -311,7 +325,10 @@ def validate(ours_path: str, ref_path: str, *,
         print(f"{sep}\n")
         return
 
-    print(f"  PIXEL-IDENTICAL: NO")
+    if mode == "watershed":
+        print(f"  PIXEL-IDENTICAL: NO  (required for watershed)")
+    else:
+        print(f"  PIXEL-IDENTICAL: NO  (checking for valid relabeling …)")
     print(f"  Differing voxels: {n_diff:,} / {n_total:,}  ({pct:.4f}%)\n")
 
     # -- 6. Relabeling check -----------------------------------------------
@@ -408,9 +425,13 @@ def validate(ours_path: str, ref_path: str, *,
 
     print(f"{sep}")
     if is_relabel:
-        print("  RESULT: TOPOLOGICALLY IDENTICAL (pure relabeling)")
+        if mode == "segmentation":
+            print("  RESULT: PASS — topologically identical (pure relabeling)")
+        else:
+            print("  RESULT: FAIL (watershed) — same topology but different label IDs")
+            print("         (would PASS in --mode segmentation)")
     else:
-        print("  RESULT: DIFFERENCES FOUND — see report above")
+        print("  RESULT: FAIL — topological differences found, see report above")
     print(f"{sep}\n")
 
 
@@ -420,17 +441,23 @@ def validate(ours_path: str, ref_path: str, *,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Validate watershed superpixels against ilastik reference.",
+        description="Validate watershed or segmentation volumes against ilastik reference.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             examples:
               %(prog)s output_watershed.zarr ilastik_ws.h5
+              %(prog)s output_seg.zarr ilastik_seg.h5 --mode segmentation
               %(prog)s output.zarr ref.h5 --save-diff diff.zarr
               %(prog)s output.zarr ref.h5 --slice-dir ./diffs --slices 50 100 150
         """),
     )
-    parser.add_argument("ours", help="Watershed from ilp-mc-block (.zarr or .h5)")
-    parser.add_argument("reference", help="Watershed from ilastik (.zarr or .h5)")
+    parser.add_argument("ours", help="Output from ilp-mc-block (.zarr or .h5)")
+    parser.add_argument("reference", help="Reference from ilastik (.zarr or .h5)")
+    parser.add_argument("--mode", choices=["watershed", "segmentation"],
+                        default="watershed",
+                        help="Validation mode: 'watershed' requires pixel-identical "
+                             "labels; 'segmentation' accepts bijective relabeling "
+                             "(default: watershed)")
     parser.add_argument("--save-diff", metavar="PATH",
                         help="Save boolean diff mask as a zarr array")
     parser.add_argument("--slices", type=int, nargs="*", metavar="Z",
@@ -444,6 +471,7 @@ def main():
     validate(
         args.ours,
         args.reference,
+        mode=args.mode,
         save_diff=args.save_diff,
         slices=args.slices,
         slice_dir=args.slice_dir,
