@@ -123,17 +123,7 @@ def _open_channel_lazy(path: str, key: str | None):
                     "Install it with: pip install fsspec aiohttp"
                 ) from exc
             mapper = fsspec.get_mapper(path)
-            try:
-                store = zarr.open(mapper, mode="r")
-            except Exception:
-                # zarr ≥3 probes zarr.json first (v3 format); the remote array
-                # may be zarr v2 which stores metadata in .zarray instead.
-                # Retry with an explicit v2 format request.
-                zarr_major = int(zarr.__version__.split(".")[0])
-                if zarr_major >= 3:
-                    store = zarr.open(mapper, mode="r", zarr_format=2)
-                else:
-                    store = zarr.open(mapper, mode="r", zarr_version=2)
+            store = zarr.open(mapper, mode="r")
         else:
             store = zarr.open(path, mode="r")
 
