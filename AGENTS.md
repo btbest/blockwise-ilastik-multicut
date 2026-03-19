@@ -142,6 +142,9 @@ An ilastik `.ilp` file is an HDF5 file. Relevant groups under `Training and Mult
 | File | Purpose |
 |------|---------|
 | `blimp.py` | Main entrypoint: full pipeline in one command |
+| `blimp_watershed.py` | Power-user entrypoint: watershed only (no multicut) |
+| `_cli_params.py` | Shared CLI parameter definitions (watershed, blockwise) |
+| `_cli_helpers.py` | Shared validation and parameter resolution |
 | `ilp_reader.py` | Read training data, features, names from `.ilp` |
 | `fit_classifier.py` | Re-fit sklearn RF from training crops |
 | `multicut_from_ilp.py` | Lower-level blockwise inference with pre-fitted RF |
