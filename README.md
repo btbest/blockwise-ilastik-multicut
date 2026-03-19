@@ -1,342 +1,140 @@
-# blockwise-ilastik-multicut
+# blimp — BLockwise Ilastik Multicut Pipeline
 
-A CLI tool (and Jupyter notebook) to run edge classifiers trained in ilastik's
-"Boundary-Based Segmentation with Multicut" workflow on large volumes using
-elf's blockwise multicut solver.
+Run edge classifiers trained in ilastik on large 3D volumes.
 
-`libs/` contains reference snapshots of
-[ilastik](https://github.com/ilastik/ilastik) and
-[elf](https://github.com/constantinpape/elf).
+**blimp** is a command-line tool that takes a trained ilastik project, raw data, and boundary predictions—then outputs a final segmentation. It's fast, memory-efficient, and works with volumes too large to fit in RAM.
 
 ---
 
-## Motivation
+## What you need
 
-ilastik's interactive training UX makes it easy to annotate a handful of
-superpixel edges as "merge" or "split" and get a well-tuned random forest
-classifier in minutes. However, ilastik's built-in multicut solver is not
-designed for large-than-memory volumes. elf provides an efficient **blockwise**
-multicut solver (hierarchical graph decomposition) that scales to large volumes.
+Before running blimp, gather three things:
 
-This project bridges the two:
+1. **A trained `.ilp` project file** — created in ilastik's "Boundary-Based Segmentation with Multicut" workflow
+2. **Boundary probability predictions** — HDF5 or zarr file with the same shape as your raw data (zyx axis order)
+3. **Raw data volume** — HDF5 or zarr (zyx axis order)
 
-1. Reads the edge training data stored inside an ilastik `.ilp` project file.
-2. Re-fits a `sklearn.RandomForestClassifier` on those training pairs — using
-   the **exact same ilastikrag feature vectors** that ilastik computed, which
-   are cached inside the `.ilp` file alongside the training labels. No
-   re-computation of features is needed for the training step, and no fidelity
-   is lost compared to the original ilastik classifier.
-3. At inference time, processes the volume **blockwise**: for each block the
-   watershed and ilastikrag features are computed independently (bounded memory
-   per block), the sklearn RF predicts edge probabilities, and elf's blockwise
-   multicut solver assembles the final segmentation.
-
----
-
-## ILP file structure (HDF5 reference)
-
-An ilastik `.ilp` file is an HDF5 file. The relevant groups for this project
-are all under `Training and Multicut/` (the `projectFileGroupName`):
-
-```
-<project>.ilp  (HDF5)
-└── Training and Multicut/
-    ├── FeatureNames/           # dict: {channel_name → [ilastikrag feature names]}
-    ├── EdgeLabelsDict/
-    │   ├── EdgeLabels0000/     # one group per training crop (lane)
-    │   ├── EdgeLabels0001/
-    │   └── EdgeLabels0002/
-    │       ├── sp_ids          # uint32 array (N, 2): superpixel id pairs
-    │       └── labels          # uint8 array (N,):   1=merge  2=split
-    ├── EdgeFeatures/
-    │   ├── 0000/               # one group per lane; pandas DataFrame as HDF5:
-    │   ├── 0001/               #   sp1, sp2, <feature_1>, <feature_2>, ...
-    │   └── 0002/
-    ├── Rags/                   # cached ilastikrag RAG (superpixel adjacency)
-    │   └── Rag_0000/
-    └── Output/                 # trained vigra random forest (not used directly)
-        ├── Forest0000/
-        ├── Forest0001/
-        ├── known_labels
-        ├── feature_names
-        └── pickled_type
-```
-
-Key insight: `EdgeFeatures` and `EdgeLabelsDict` together form a complete
-labeled training set. The feature vectors are already in ilastikrag's feature
-space, so no feature re-computation is needed for the re-fit step.
-
----
-
-## Architecture
-
-### Training step (runs on the `.ilp` file once)
-
-```
-.ilp  (trained on N crops / lanes)
-  ├── EdgeFeatures/0000 … EdgeFeatures/000N  →  feature matrices per crop
-  └── EdgeLabelsDict/EdgeLabels0000 … 000N   →  merge/split labels per crop
-
-        discover_lanes() → [0, 1, 2, …]
-        concat across all lanes
-              ↓
-  sklearn.RandomForestClassifier.fit(X_all_lanes, y_all_lanes)
-              ↓
-  save sklearn RF as rf.pkl
-```
-
-The resulting `rf.pkl` uses elf's expected sklearn interface:
-`rf.predict_proba(features)[:, split_col]` → boundary probability per edge.
-
-### Inference step — lazy/blockwise (for the full large volume)
-
-```
-Large volume (zarr / HDF5, any size — never fully loaded)
-              ↓
-  blockwise_two_pass_watershed(boundary_lazy, output=ws_memmap_on_disk)
-              ↓
-  [for each block with halo — sequential, bounded RAM]
-    ws_block     = ws_memmap[outer_bb]        ← load one block from disk
-    channel_data = {name: lazy[outer_bb]}     ← load one block per channel
-    ilastikrag.Rag(ws_block)
-    rag.compute_features(channel_data, feature_names)
-    rf.predict_proba(features)[:, split_col]
-    accumulate → global edge cost dict (in RAM, ~1–5 GB)
-              ↓
-  nifty.graph.undirectedGraph + insertEdges(edge_uvs)
-              ↓
-  blockwise_multicut(graph, costs, ws_memmap)  ← ws read block-by-block ✓
-              ↓
-  [for each block] node_labels[ws_memmap[bb]] → write zarr output
-```
-
-Memory peak: one block of input data + global edge dict (~10–15 GB total for a
-typical 20 GB volume).
-
-Memory is bounded per block. Only the global graph (superpixel adjacency + one
-float per edge) must be held in memory simultaneously, which is small compared
-to the raw voxel data.
-
----
-
-## What you need before running
-
-Three inputs are required:
-
-1. **A trained `.ilp` project file** — created in ilastik's "Boundary-Based
-   Segmentation with Multicut" workflow. This contains the training annotations
-   and cached feature vectors used to fit the classifier.
-
-2. **Boundary probability predictions** — these are **not** computed by this
-   tool. Run ilastik's **Pixel Classification** workflow (or any other boundary
-   detector) on your full volume first, then export the probability map as HDF5
-   or zarr.  The boundary probabilities must have the same shape as the raw
-   data (zyx axis order, single channel).
-
-3. **The raw data volume** — required because raw intensity is used as one of
-   the ilastikrag channels (see feature names below).
+> **Note:** Boundary predictions are not computed by blimp. Run ilastik's Pixel Classification workflow (or another boundary detector) first, then export the probability map.
 
 ---
 
 ## Installation
 
 ```bash
-# Create and activate the conda environment (installs all dependencies)
-conda env create -n bmc -f environment.yml
-conda activate bmc
+# Create the conda environment (installs dependencies)
+conda env create -n blimp -f environment.yml
+conda activate blimp
 
-# Install this package so the ilp-mc-block command is available
+# Install blimp
 pip install -e .
 ```
 
-After `pip install -e .` the `ilp-mc-block` command is on your `PATH`.
+The `blimp` command will now be available on your PATH.
 
 ---
 
-## Channel names
-
-During training, ilastik assigns each input channel an internal name.  With
-default feature choices the names are exactly:
-
-```python
-from ilp_reader import read_feature_names
-
-print(read_feature_names("my_project.ilp"))
-# {
-#   'Raw Data': [
-#       'standard_sp_mean',
-#       'standard_sp_quantiles_10',
-#       'standard_sp_quantiles_90',
-#   ],
-#   'wsdt boundary channel': [
-#       'edgeregion_edge_regionradii_0',
-#       'edgeregion_edge_regionradii_1',
-#       'edgeregion_edge_regionradii_2',
-#       'standard_edge_mean',
-#       'standard_edge_quantiles_10',
-#       'standard_edge_quantiles_90',
-#   ],
-# }
-```
-
-`'wsdt boundary channel'` is the boundary probability map used both for the
-watershed (wsdt = watershed distance transform) and for ilastikrag edge
-features.  `ilp-mc-block` identifies these two channels automatically from
-their names and maps them to the files you provide via `--raw` and
-`--probabilities`.
-
----
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `ilp_mc_block.py` | **Main entrypoint**: full pipeline in one command (`ilp-mc-block`) |
-| `ilp_reader.py` | Read EdgeFeatures, EdgeLabelsDict, FeatureNames from `.ilp`; multi-lane aware |
-| `fit_classifier.py` | Re-fit a sklearn RF from all training crops; save as pickle |
-| `multicut_from_ilp.py` | Lower-level, lazy blockwise inference using a pre-fitted RF |
-
----
-
-## Requirements
-
-See `environment.yml` for the full dependency list.  Key packages:
-
-```
-conda install -c ilastik-forge ilastikrag vigra
-conda install -c conda-forge scikit-learn h5py zarr nifty
-pip install elf
-```
-
-`vigra` is only needed at inference time (for ilastikrag's RAG construction).
-It is **not** needed to re-fit the classifier or to read the training data from
-the `.ilp` file.
-
----
-
-## Usage
-
-### Quick start — `ilp-mc-block`
-
-The single command runs the full pipeline: fits the classifier, then runs
-blockwise lazy multicut.  All outputs go to `--output-dir`.
+## Quick start
 
 ```bash
-ilp-mc-block \
+blimp \
     --ilp my_project.ilp \
     --raw raw.zarr \
     --probabilities boundary.zarr \
-    --output-dir results/ \
-    --beta 0.5 \
-    --threads 8
+    --output-dir results/
 ```
 
 **Output files in `results/`:**
 
 | File | Contents |
 |------|----------|
-| `raw_segmentation.zarr` | Final segmentation (uint64, zyx), named after `--raw` |
-| `rf.pkl` | Fitted sklearn classifier |
-| `params.json` | Exact call parameters for reproducibility |
-| `raw_watershed.zarr` | Watershed superpixels (uint64, zyx), named after `--raw` |
+| `raw_segmentation.zarr` | Final segmentation (uint64, zyx) |
+| `rf.pkl` | Fitted classifier |
+| `params.json` | Call parameters for reproducibility |
+| `raw_watershed.zarr` | Watershed superpixels |
 
-**Input formats** — both `--raw` and `--probabilities` accept:
+### Input formats
 
+Both `--raw` and `--probabilities` accept:
+
+- **zarr:** `/path/to/file.zarr`
+- **HDF5:** `/path/to/file.h5` (must contain exactly one dataset)
+- **Windows paths:** `C:\Users\...\file.h5`
+
+Volumes must be in **zyx(c) axis order** with the **same shape**. Singleton channels are OK.
+
+---
+
+## Common options
+
+```bash
+blimp --ilp project.ilp --raw raw.zarr --probabilities boundary.zarr --output-dir results/ \
+    --max-block-shape 256 256 256      # block size (default)
+    --halo 32 32 32                     # block overlap (default)
+    --beta 0.5                          # merge/split bias (0.5 = balanced)
+    --threads 8                         # parallel threads (default)
+    --n-estimators 100                  # RF trees (default)
 ```
-/path/to/file.zarr           local zarr store
-/path/to/file.h5       HDF5 file with
-```
 
-Volumes must be in **zyx(c) axis order** (singletong channel is ignored) and have the **same shape**.
+**Understanding beta:**
+- `beta < 0.5`: favors merging segments
+- `beta = 0.5`: balanced (default)
+- `beta > 0.5`: favors splitting segments
 
-**All options:**
+For **anisotropic data** (e.g., 2D microscopy), use `--ws-method 2d`.
+
+### All options
 
 ```
 Required:
-  --ilp PATH            Ilastik .ilp project file
-  --raw PATH[:KEY]      Raw data volume
-  --probabilities PATH[:KEY]
-                        Boundary probability volume
-  --output-dir DIR      Output directory (created if absent)
+  --ilp PATH                  Ilastik .ilp project file
+  --raw PATH                  Raw data volume
+  --probabilities PATH        Boundary probability volume
+  --output-dir DIR            Output directory
 
 Blockwise / multicut:
-  --block-shape Z Y X   (default: 256 256 256)
-  --halo Z Y X          (default: 32 32 32)
-  --beta FLOAT          Edge-cost bias; <0.5 merges more, >0.5 splits more
-                        (default: 0.5)
-  --threads INT         Parallel threads (default: 8)
-  --solver              kernighan-lin | greedy-additive | greedy-fixation
-                        (default: kernighan-lin)
+  --max-block-shape Z Y X     Block size (default: 256 256 256)
+  --halo Z Y X                Block overlap (default: 32 32 32)
+  --beta FLOAT                Merge/split bias (default: 0.5)
+  --threads INT               Parallel threads (default: 8)
+  --solver                    kernighan-lin | greedy-additive | greedy-fixation
+                              (default: kernighan-lin)
 
 Classifier:
-  --n-estimators INT    Number of RF trees (default: 100)
+  --n-estimators INT          Random forest trees (default: 100)
 
 Watershed:
-  --use-2dws            Stacked 2D watersheds (for anisotropic data)
-  --ws-threshold FLOAT  (default: 0.5)
-  --ws-sigma FLOAT      (default: 2.0)
+  --ws-method                 ilastik | two-pass | 2d
+  --ws-threshold FLOAT        Seed threshold (default: from .ilp or 0.5)
+  --ws-sigma FLOAT            Gaussian smoothing (default: from .ilp or 3.0)
+  --ws-min-size INT           Min superpixel size (default: from .ilp or 100)
+  --ws-invert                 Flip probability map (interior→boundary)
+
+Reuse watershed:
+  --ws-zarr PATH              Use pre-computed watershed (skips ws step)
+  --keep-watershed | --no-keep-watershed  Keep the watershed zarr (default: keep)
 ```
 
 ---
 
-### Advanced: run steps separately
+## Need help?
 
-For more control, the two steps can be run independently.
-
-#### Step 1 — re-fit the sklearn classifier
-
-```bash
-python fit_classifier.py \
-    --ilp my_project.ilp \
-    --output rf.pkl \
-    --n-estimators 100 \
-    --n-jobs 8
-# lane defaults to None → reads and concatenates all training crops
-```
-
-#### Step 2 - blockwise multicut lazy mode (large volumes, e.g. 20 GB)
-
-```bash
-python multicut_from_ilp.py \
-    --ilp my_project.ilp \
-    --rf rf.pkl \
-    --channels "wsdt boundary channel:boundary.zarr" \
-               "Raw Data:raw.zarr" \
-    --lazy \
-    --ws-tmp /scratch/ws_tmp.dat \
-    --output-zarr segmentation.zarr \
-    --block-shape 256 256 256 --halo 32 32 32 \
-    --beta 0.5 --n-threads 8
-```
-
-The `--channels` argument maps each ilastik channel name (from `read_feature_names`)
-to the corresponding file.  Channel names must exactly match the keys returned by
-`read_feature_names`.
-
-Disk space of `volume_shape × 8 bytes` is needed for the
-watershed, in addition to the segmentation.
+- **Why is my segmentation noisy?** Try adjusting `--beta` (values <0.5 merge more).
+- **Is my data too large?** blimp processes blockwise. Peak RAM for a 20 GB volume is ~10–15 GB.
+- **Can I reuse the watershed?** Yes—save it with `--keep-watershed` (default), then pass `--ws-zarr` to a new run.
 
 ---
 
-## Memory usage
+## For developers
 
-- **Re-fit step**: negligible — reads DataFrames from HDF5 (one per crop).
-- **Lazy inference per block** (256³ + 32-voxel halo):
-  - Input data: ~0.5–1 GB per block (float32, 2 channels)
-  - Watershed: stored as zarr (uint64, ≈ 8× raw voxel count
-    in bytes); never fully in RAM
-  - ilastikrag.Rag: only the block's superpixels are needed in RAM ✓
-- **Global edge dict**: all edge costs accumulated in a Python dict.
-  For a 20 GB uint8 volume with ~1000 voxels/superpixel there are O(10⁷)
-  edges → ~500 MB.
-- **blockwise_multicut**: reads the watershed memmap one block at a time via
-  `segmentation[bb]` (returns numpy from memmap) ✓
-- **Estimated peak RAM for a 20 GB volume**: ~10–15 GB.
+See [AGENTS.md](AGENTS.md) for:
+- Architecture and design
+- HDF5 `.ilp` file format reference
+- Running individual pipeline steps
+- Memory analysis
+- Feature computation details
 
 ---
 
-## Limitations and future work
+## License
 
-- **Out-of-core global graph assembly.** Currently the global superpixel graph
-  is assembled in memory. For very large volumes (>10⁹ voxels) a disk-backed
-  sparse representation (e.g. zarr-backed nifty graph) would be needed.
+See LICENSE file.
