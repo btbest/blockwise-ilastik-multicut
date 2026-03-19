@@ -1,11 +1,11 @@
 """
 blimp  –  single-command ilastik multicut pipeline
 
-Fits the sklearn classifier from the .ilp training data, then immediately runs
-the blockwise lazy multicut on the provided raw data and boundary probabilities.
-All outputs land in --output-dir:
+Loads the edge classifier from the .ilp (or re-fits one from training data),
+then immediately runs the blockwise lazy multicut on the provided raw data
+and boundary probabilities.  All outputs land in --output-dir:
 
-    rf.pkl                          sklearn random forest classifier
+    rf.pkl                          classifier pickle (only if --classifier-source sklearn)
     <raw_stem>_segmentation.zarr    final segmentation (uint64, zyx)
     <raw_stem>_watershed.zarr       watershed superpixels
     params.json                     exact call parameters for reproducibility
@@ -89,8 +89,19 @@ def main():
 
     # Classifier parameters
     parser.add_argument(
+        "--classifier-source",
+        choices=["ilp", "sklearn"],
+        default="ilp",
+        help=(
+            "Where to get the edge classifier.  'ilp' (default) extracts the "
+            "already-trained vigra RF from the .ilp (identical to ilastik's own "
+            "predictions).  'sklearn' re-fits a new sklearn RF from the cached "
+            "training data."
+        ),
+    )
+    parser.add_argument(
         "--n-estimators", type=int, default=100,
-        help="Number of trees in the random forest (default: 100)",
+        help="Number of trees in the random forest (only used with --classifier-source sklearn; default: 100)",
     )
 
     # Watershed method
@@ -171,7 +182,7 @@ def main():
     args = parser.parse_args()
 
     # Lazy imports: only load heavy modules after argument parsing succeeds
-    from fit_classifier import fit_rf_from_ilp
+    from fit_classifier import extract_vigra_rf_from_ilp, fit_rf_from_ilp
     from ilp_reader import read_feature_names, read_wsdt_params
     from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_channel_spec, _run_lazy
 
@@ -239,6 +250,7 @@ def main():
         "halo":           args.halo,
         "beta":           args.beta,
         "threads":        args.threads,
+        "classifier_source": args.classifier_source,
         "n_estimators":   args.n_estimators,
         "ws_method":      ws_method,
         "ws_threshold":   ws_threshold,
@@ -257,17 +269,21 @@ def main():
     print(f"Parameters written to {params_file}")
 
     # -----------------------------------------------------------------------
-    # Step 1: Fit sklearn classifier from the .ilp training data
+    # Step 1: Load or fit the edge classifier
     # -----------------------------------------------------------------------
-    print("\n=== Step 1/3: Fitting classifier ===")
-    rf = fit_rf_from_ilp(
-        args.ilp,
-        n_estimators=args.n_estimators,
-        n_jobs=args.threads,
-    )
-    with open(rf_pkl, "wb") as fh:
-        pickle.dump(rf, fh)
-    print(f"Classifier saved to {rf_pkl}")
+    print("\n=== Step 1/3: Loading classifier ===")
+    if args.classifier_source == "ilp":
+        rf = extract_vigra_rf_from_ilp(args.ilp)
+    else:
+        rf = fit_rf_from_ilp(
+            args.ilp,
+            n_estimators=args.n_estimators,
+            n_jobs=args.threads,
+        )
+        # Only pickle the sklearn classifier; vigra one is already in the .ilp
+        with open(rf_pkl, "wb") as fh:
+            pickle.dump(rf, fh)
+        print(f"Classifier saved to {rf_pkl}")
 
     # -----------------------------------------------------------------------
     # Step 2: Map --raw / --probabilities to the ILP channel names
