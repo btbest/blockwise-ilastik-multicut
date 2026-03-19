@@ -7,16 +7,17 @@ Two strategies are available:
 * **ilp** (default): extract the *already-trained* vigra random forests
   stored inside the .ilp and wrap them in a thin sklearn-compatible adapter
   (``VigraRfSklearnWrapper``).  This gives predictions identical to ilastik.
+  (No pickling needed; the classifier is already in the .ilp.)
 
 * **sklearn**: re-fit a new ``sklearn.ensemble.RandomForestClassifier`` on the
-  training data cached in the .ilp.  Useful when vigra is not available.
+  training data cached in the .ilp and save it as a pickle.
 
 Usage (CLI)
 -----------
-    # Extract the RF from the .ilp (default)
+    # Extract the RF from the .ilp (default; returns a wrapper, not pickled)
     python fit_classifier.py --ilp my_project.ilp --output rf.pkl
 
-    # Re-fit a sklearn RF instead
+    # Re-fit a sklearn RF and pickle it
     python fit_classifier.py --ilp my_project.ilp --output rf.pkl \
         --classifier-source sklearn --n-estimators 100 --n-jobs 8
 
@@ -24,12 +25,12 @@ Usage (Python)
 --------------
     from fit_classifier import extract_vigra_rf_from_ilp, fit_rf_from_ilp
 
-    rf = extract_vigra_rf_from_ilp("my_project.ilp")   # from .ilp
+    rf = extract_vigra_rf_from_ilp("my_project.ilp")   # from .ilp (no pickling)
     rf = fit_rf_from_ilp("my_project.ilp")              # sklearn re-fit
 
     import pickle
     with open("rf.pkl", "wb") as f:
-        pickle.dump(rf, f)
+        pickle.dump(rf, f)  # only needed for sklearn
 """
 
 import argparse

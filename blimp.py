@@ -1,11 +1,11 @@
 """
 blimp  –  single-command ilastik multicut pipeline
 
-Fits the sklearn classifier from the .ilp training data, then immediately runs
-the blockwise lazy multicut on the provided raw data and boundary probabilities.
-All outputs land in --output-dir:
+Loads the edge classifier from the .ilp (or re-fits one from training data),
+then immediately runs the blockwise lazy multicut on the provided raw data
+and boundary probabilities.  All outputs land in --output-dir:
 
-    rf.pkl                          sklearn random forest classifier
+    rf.pkl                          classifier pickle (only if --classifier-source sklearn)
     <raw_stem>_segmentation.zarr    final segmentation (uint64, zyx)
     <raw_stem>_watershed.zarr       watershed superpixels
     params.json                     exact call parameters for reproducibility
@@ -280,9 +280,10 @@ def main():
             n_estimators=args.n_estimators,
             n_jobs=args.threads,
         )
-    with open(rf_pkl, "wb") as fh:
-        pickle.dump(rf, fh)
-    print(f"Classifier saved to {rf_pkl}")
+        # Only pickle the sklearn classifier; vigra one is already in the .ilp
+        with open(rf_pkl, "wb") as fh:
+            pickle.dump(rf, fh)
+        print(f"Classifier saved to {rf_pkl}")
 
     # -----------------------------------------------------------------------
     # Step 2: Map --raw / --probabilities to the ILP channel names
