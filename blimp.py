@@ -1,5 +1,5 @@
 """
-ilp-mc-block  –  single-command ilastik multicut pipeline
+blimp  –  single-command ilastik multicut pipeline
 
 Fits the sklearn classifier from the .ilp training data, then immediately runs
 the blockwise lazy multicut on the provided raw data and boundary probabilities.
@@ -15,7 +15,7 @@ Or pass ws-zarr to point to a precomputed watershed zarr.
 
 Usage
 -----
-    ilp-mc-block \\
+    blimp \\
         --ilp my_project.ilp \\
         --raw raw.zarr \\
         --probabilities boundaries.zarr \\
@@ -47,7 +47,7 @@ from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="ilp-mc-block",
+        prog="blimp",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
