@@ -4,10 +4,11 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
-  - python
+  - python=3.11
   - numpy>=1
   - ilastikrag>=0.1.4
   - vigra=1.12.1
+  - fastfilters
   - nifty
   - affogato
   - scikit-learn<=1.6.1
