@@ -90,6 +90,7 @@ pip install -e .
 ```
 
 The `blimp` command will now be available.
+Try `blimp -h` to verify (this should print the help text).
 
 ---
 
