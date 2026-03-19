@@ -90,13 +90,13 @@ def main():
     # Classifier parameters
     parser.add_argument(
         "--classifier-source",
-        choices=["vigra", "sklearn"],
-        default="vigra",
+        choices=["ilp", "sklearn"],
+        default="ilp",
         help=(
-            "Where to get the edge classifier.  'vigra' (default) extracts the "
+            "Where to get the edge classifier.  'ilp' (default) extracts the "
             "already-trained vigra RF from the .ilp (identical to ilastik's own "
             "predictions).  'sklearn' re-fits a new sklearn RF from the cached "
-            "training data.  If 'vigra' is selected but vigra is not installed, "
+            "training data.  If 'ilp' is selected but vigra is not installed, "
             "falls back to 'sklearn' automatically."
         ),
     )
@@ -273,14 +273,14 @@ def main():
     # -----------------------------------------------------------------------
     print("\n=== Step 1/3: Loading classifier ===")
     classifier_source = args.classifier_source
-    if classifier_source == "vigra":
+    if classifier_source == "ilp":
         try:
             rf = extract_vigra_rf_from_ilp(args.ilp)
         except ImportError:
             warnings.warn(
-                "vigra is not installed; falling back to --classifier-source sklearn.  "
+                "vigra is not installed; falling back to sklearn.  "
                 "Install vigra (conda install -c ilastik-forge vigra) for "
-                "ilastik-identical predictions.",
+                "ilastik-identical predictions from the .ilp.",
                 stacklevel=1,
             )
             classifier_source = "sklearn"

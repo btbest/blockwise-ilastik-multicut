@@ -4,7 +4,7 @@ Obtain a random-forest edge classifier from an ilastik .ilp project file.
 
 Two strategies are available:
 
-* **vigra** (default): extract the *already-trained* vigra random forests
+* **ilp** (default): extract the *already-trained* vigra random forests
   stored inside the .ilp and wrap them in a thin sklearn-compatible adapter
   (``VigraRfSklearnWrapper``).  This gives predictions identical to ilastik.
 
@@ -13,7 +13,7 @@ Two strategies are available:
 
 Usage (CLI)
 -----------
-    # Extract the vigra RF (default)
+    # Extract the RF from the .ilp (default)
     python fit_classifier.py --ilp my_project.ilp --output rf.pkl
 
     # Re-fit a sklearn RF instead
@@ -24,8 +24,8 @@ Usage (Python)
 --------------
     from fit_classifier import extract_vigra_rf_from_ilp, fit_rf_from_ilp
 
-    rf = extract_vigra_rf_from_ilp("my_project.ilp")   # vigra
-    rf = fit_rf_from_ilp("my_project.ilp")              # sklearn
+    rf = extract_vigra_rf_from_ilp("my_project.ilp")   # from .ilp
+    rf = fit_rf_from_ilp("my_project.ilp")              # sklearn re-fit
 
     import pickle
     with open("rf.pkl", "wb") as f:
@@ -252,10 +252,10 @@ def main():
     parser.add_argument("--output", required=True, help="Output path for pickled classifier")
     parser.add_argument(
         "--classifier-source",
-        choices=["vigra", "sklearn"],
-        default="vigra",
+        choices=["ilp", "sklearn"],
+        default="ilp",
         help=(
-            "Where to get the classifier.  'vigra' (default) extracts the "
+            "Where to get the classifier.  'ilp' (default) extracts the "
             "already-trained vigra RF from the .ilp.  'sklearn' re-fits a new "
             "sklearn RF from the cached training data."
         ),
@@ -272,7 +272,7 @@ def main():
     parser.add_argument("--random-state", type=int, default=42)
     args = parser.parse_args()
 
-    if args.classifier_source == "vigra":
+    if args.classifier_source == "ilp":
         rf = extract_vigra_rf_from_ilp(args.ilp)
     else:
         rf = fit_rf_from_ilp(
