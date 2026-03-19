@@ -96,8 +96,7 @@ def main():
             "Where to get the edge classifier.  'ilp' (default) extracts the "
             "already-trained vigra RF from the .ilp (identical to ilastik's own "
             "predictions).  'sklearn' re-fits a new sklearn RF from the cached "
-            "training data.  If 'ilp' is selected but vigra is not installed, "
-            "falls back to 'sklearn' automatically."
+            "training data."
         ),
     )
     parser.add_argument(
@@ -251,6 +250,7 @@ def main():
         "halo":           args.halo,
         "beta":           args.beta,
         "threads":        args.threads,
+        "classifier_source": args.classifier_source,
         "n_estimators":   args.n_estimators,
         "ws_method":      ws_method,
         "ws_threshold":   ws_threshold,
@@ -272,23 +272,8 @@ def main():
     # Step 1: Load or fit the edge classifier
     # -----------------------------------------------------------------------
     print("\n=== Step 1/3: Loading classifier ===")
-    classifier_source = args.classifier_source
-    if classifier_source == "ilp":
-        try:
-            rf = extract_vigra_rf_from_ilp(args.ilp)
-        except ImportError:
-            warnings.warn(
-                "vigra is not installed; falling back to sklearn.  "
-                "Install vigra (conda install -c ilastik-forge vigra) for "
-                "ilastik-identical predictions from the .ilp.",
-                stacklevel=1,
-            )
-            classifier_source = "sklearn"
-            rf = fit_rf_from_ilp(
-                args.ilp,
-                n_estimators=args.n_estimators,
-                n_jobs=args.threads,
-            )
+    if args.classifier_source == "ilp":
+        rf = extract_vigra_rf_from_ilp(args.ilp)
     else:
         rf = fit_rf_from_ilp(
             args.ilp,
@@ -298,8 +283,6 @@ def main():
     with open(rf_pkl, "wb") as fh:
         pickle.dump(rf, fh)
     print(f"Classifier saved to {rf_pkl}")
-    params["classifier_source"] = classifier_source
-    params_file.write_text(json.dumps(params, indent=2) + "\n")
 
     # -----------------------------------------------------------------------
     # Step 2: Map --raw / --probabilities to the ILP channel names

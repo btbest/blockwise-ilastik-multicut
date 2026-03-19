@@ -104,11 +104,6 @@ def extract_vigra_rf_from_ilp(ilp_path: str) -> VigraRfSklearnWrapper:
     VigraRfSklearnWrapper
         A classifier with ``classes_`` and ``predict_proba`` matching the
         sklearn interface expected by the multicut pipeline.
-
-    Raises
-    ------
-    ImportError
-        If ``vigra`` is not installed.
     """
     import vigra  # intentionally late so ImportError is catchable
 
@@ -256,8 +251,8 @@ def main():
         default="ilp",
         help=(
             "Where to get the classifier.  'ilp' (default) extracts the "
-            "already-trained vigra RF from the .ilp.  'sklearn' re-fits a new "
-            "sklearn RF from the cached training data."
+            "already-trained vigra RF from the .ilp (identical to ilastik).  "
+            "'sklearn' re-fits a new sklearn RF from the cached training data."
         ),
     )
     parser.add_argument(
