@@ -40,10 +40,6 @@ import sys
 import warnings
 from pathlib import Path
 
-from fit_classifier import fit_rf_from_ilp
-from ilp_reader import read_feature_names, read_wsdt_params
-from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_channel_spec, _run_lazy
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -173,6 +169,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Lazy imports: only load heavy modules after argument parsing succeeds
+    from fit_classifier import fit_rf_from_ilp
+    from ilp_reader import read_feature_names, read_wsdt_params
+    from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_channel_spec, _run_lazy
 
     # -----------------------------------------------------------------------
     # Read DT Watershed parameters from the .ilp; CLI flags override them.
