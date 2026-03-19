@@ -74,7 +74,7 @@ def main():
     parser.add_argument(
         "--max-block-shape", type=int, nargs=3, default=[256, 256, 256],
         metavar=("Z", "Y", "X"),
-        help="Maximum block shape; actual shape may be slightly smaller to satisfy "
+        help="Maximum block shape; ws-method=two-pass may reduce this to satisfy "
              "checkerboard requirements (default: 256 256 256)",
     )
     parser.add_argument(
@@ -109,9 +109,8 @@ def main():
             "vigra.labelMultiArray per block, cumulative offsets.  Produces "
             "pixel-identical superpixels to ilastik when the same boundary map "
             "and parameters are used.  "
-            "``two-pass``: elf checkerboard two-pass watershed (previous default; "
-            "uses --max-block-shape and --halo).  "
-            "``2d``: stacked 2-D watershed, recommended for strongly anisotropic data.  "
+            "``two-pass (experimental)``: elf checkerboard two-pass watershed (uses --max-block-shape and --halo).  "
+            "``2d (experimental)``: stacked 2-D watershed, for strongly anisotropic data.  "
             "When omitted, ``ilastik`` is used for projects with BlockwiseWatershed=True "
             "(all recent projects), ``two-pass`` for older projects that stored "
             "BlockwiseWatershed=False."

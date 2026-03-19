@@ -75,12 +75,13 @@ blimp --ilp project.ilp --raw raw.zarr --probabilities boundary.zarr --output-di
     --n-estimators 100                  # RF trees (default)
 ```
 
-**Understanding beta:**
+Note that `max_block_shape` determines block size for the blockwise *multicut* only.
+The watershed uses ilastik block size (128x128x128).
+
+What does beta do?
 - `beta < 0.5`: favors merging segments
 - `beta = 0.5`: balanced (default)
 - `beta > 0.5`: favors splitting segments
-
-For **anisotropic data** (e.g., 2D microscopy), use `--ws-method 2d`.
 
 ### All options
 
@@ -91,7 +92,7 @@ Required:
   --probabilities PATH        Boundary probability volume
   --output-dir DIR            Output directory
 
-Blockwise / multicut:
+Blockwise multicut:
   --max-block-shape Z Y X     Block size (default: 256 256 256)
   --halo Z Y X                Block overlap (default: 32 32 32)
   --beta FLOAT                Merge/split bias (default: 0.5)
@@ -103,24 +104,15 @@ Classifier:
   --n-estimators INT          Random forest trees (default: 100)
 
 Watershed:
-  --ws-method                 ilastik | two-pass | 2d
   --ws-threshold FLOAT        Seed threshold (default: from .ilp or 0.5)
   --ws-sigma FLOAT            Gaussian smoothing (default: from .ilp or 3.0)
   --ws-min-size INT           Min superpixel size (default: from .ilp or 100)
-  --ws-invert                 Flip probability map (interior→boundary)
+  --ws-invert                 Flip probability map (if high probability = *interior*, not boundary)
 
 Reuse watershed:
   --ws-zarr PATH              Use pre-computed watershed (skips ws step)
-  --keep-watershed | --no-keep-watershed  Keep the watershed zarr (default: keep)
+  --no-keep-watershed         Discard watershed zarr (default: keep)
 ```
-
----
-
-## Need help?
-
-- **Why is my segmentation noisy?** Try adjusting `--beta` (values <0.5 merge more).
-- **Is my data too large?** blimp processes blockwise. Peak RAM for a 20 GB volume is ~10–15 GB.
-- **Can I reuse the watershed?** Yes—save it with `--keep-watershed` (default), then pass `--ws-zarr` to a new run.
 
 ---
 
