@@ -1,38 +1,166 @@
 """
 fit_classifier.py
-Re-fit a sklearn RandomForestClassifier on training data extracted from an
-ilastik .ilp project file, then save it as a pickle for use at inference time.
+Obtain a random-forest edge classifier from an ilastik .ilp project file.
 
-The training data (feature vectors + merge/split labels) is read directly from
-the cached EdgeFeatures and EdgeLabelsDict stored inside the .ilp file, so no
-feature re-computation is needed and the feature space is identical to what the
-vigra RF inside ilastik was trained on.
+Two strategies are available:
+
+* **vigra** (default): extract the *already-trained* vigra random forests
+  stored inside the .ilp and wrap them in a thin sklearn-compatible adapter
+  (``VigraRfSklearnWrapper``).  This gives predictions identical to ilastik.
+
+* **sklearn**: re-fit a new ``sklearn.ensemble.RandomForestClassifier`` on the
+  training data cached in the .ilp.  Useful when vigra is not available.
 
 Usage (CLI)
 -----------
-    python fit_classifier.py \
-        --ilp my_project.ilp \
-        --output rf.pkl \
-        --n-estimators 100 \
-        --n-jobs 8
+    # Extract the vigra RF (default)
+    python fit_classifier.py --ilp my_project.ilp --output rf.pkl
+
+    # Re-fit a sklearn RF instead
+    python fit_classifier.py --ilp my_project.ilp --output rf.pkl \
+        --classifier-source sklearn --n-estimators 100 --n-jobs 8
 
 Usage (Python)
 --------------
-    from fit_classifier import fit_rf_from_ilp
-    rf = fit_rf_from_ilp("my_project.ilp")
+    from fit_classifier import extract_vigra_rf_from_ilp, fit_rf_from_ilp
+
+    rf = extract_vigra_rf_from_ilp("my_project.ilp")   # vigra
+    rf = fit_rf_from_ilp("my_project.ilp")              # sklearn
+
     import pickle
     with open("rf.pkl", "wb") as f:
         pickle.dump(rf, f)
 """
 
 import argparse
+import os
 import pickle
 import sys
+import tempfile
 
+import h5py
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
 from ilp_reader import read_feature_names, read_training_data
+
+
+# ---------------------------------------------------------------------------
+# Vigra RF wrapper with sklearn-compatible interface
+# ---------------------------------------------------------------------------
+
+class VigraRfSklearnWrapper:
+    """Wrap one or more ``vigra.learning.RandomForest`` objects so they
+    expose the two attributes consumed by the multicut pipeline:
+
+    * ``classes_``  – 1-D array of class labels (e.g. ``[1, 2]``)
+    * ``predict_proba(X)`` – return ``(n_samples, n_classes)`` probabilities
+
+    The aggregation across sub-forests mirrors ilastik's
+    ``ParallelVigraRfLazyflowClassifier.predict_probabilities``: each
+    forest's output is weighted by its tree count, then normalised by the
+    total number of trees.
+    """
+
+    def __init__(self, forests, known_labels):
+        self._forests = forests
+        self._tree_counts = [f.treeCount() for f in forests]
+        self._total_trees = sum(self._tree_counts)
+        self.classes_ = np.array(known_labels)
+
+    def predict_proba(self, X):
+        X = np.asarray(X, dtype=np.float32)
+        assert X.ndim == 2
+        result = None
+        for forest, tc in zip(self._forests, self._tree_counts):
+            probs = forest.predictProbabilities(X)
+            probs *= tc
+            if result is None:
+                result = probs
+            else:
+                result += probs
+        result /= self._total_trees
+        return result
+
+    def __repr__(self):
+        return (
+            f"VigraRfSklearnWrapper("
+            f"{len(self._forests)} forests, "
+            f"{self._total_trees} trees, "
+            f"classes={self.classes_.tolist()})"
+        )
+
+
+def extract_vigra_rf_from_ilp(ilp_path: str) -> VigraRfSklearnWrapper:
+    """Extract the trained vigra random forests from an ilastik .ilp file.
+
+    Parameters
+    ----------
+    ilp_path : str
+        Path to the ilastik ``.ilp`` project file.
+
+    Returns
+    -------
+    VigraRfSklearnWrapper
+        A classifier with ``classes_`` and ``predict_proba`` matching the
+        sklearn interface expected by the multicut pipeline.
+
+    Raises
+    ------
+    ImportError
+        If ``vigra`` is not installed.
+    """
+    import vigra  # intentionally late so ImportError is catchable
+
+    print(f"Extracting vigra RF from {ilp_path} …")
+
+    # vigra cannot read from an already-open HDF5 file (non-shared DLL issue),
+    # so we copy the classifier group to a temporary file first.
+    tmp_dir = tempfile.mkdtemp()
+    cache_path = os.path.join(tmp_dir, "tmp_classifier_cache.h5").replace("\\", "/")
+
+    try:
+        with h5py.File(ilp_path, "r") as h5:
+            src = h5["Training and Multicut/Output"]
+
+            # Copy forest data to temp file
+            with h5py.File(cache_path, "w") as cache:
+                cache.copy(src, "Output")
+
+            # Read known_labels while the file is open
+            try:
+                known_labels = list(src["known_labels"][:])
+            except KeyError:
+                # Older projects didn't store labels; infer from first forest
+                known_labels = None
+
+        # Load each sub-forest from the temp file
+        forests = []
+        with h5py.File(cache_path, "r") as cache:
+            grp = cache["Output"]
+            forest_keys = sorted(k for k in grp.keys() if k.startswith("Forest"))
+
+        for fk in forest_keys:
+            target = f"Output/{fk}"
+            forests.append(vigra.learning.RandomForest(cache_path, target))
+
+        if known_labels is None:
+            known_labels = list(range(1, forests[0].labelCount() + 1))
+
+        total_trees = sum(f.treeCount() for f in forests)
+        print(
+            f"  Loaded {len(forests)} sub-forests, "
+            f"{total_trees} trees total, "
+            f"labels {known_labels}"
+        )
+
+    finally:
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+        if os.path.exists(tmp_dir):
+            os.rmdir(tmp_dir)
+
+    return VigraRfSklearnWrapper(forests, known_labels)
 
 
 def fit_rf_from_ilp(
@@ -118,26 +246,42 @@ def fit_rf_from_ilp(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fit a sklearn RF from ilastik .ilp training data."
+        description="Obtain a random-forest edge classifier from an ilastik .ilp file."
     )
     parser.add_argument("--ilp", required=True, help="Path to ilastik .ilp project file")
-    parser.add_argument("--output", required=True, help="Output path for pickled sklearn RF")
+    parser.add_argument("--output", required=True, help="Output path for pickled classifier")
+    parser.add_argument(
+        "--classifier-source",
+        choices=["vigra", "sklearn"],
+        default="vigra",
+        help=(
+            "Where to get the classifier.  'vigra' (default) extracts the "
+            "already-trained vigra RF from the .ilp.  'sklearn' re-fits a new "
+            "sklearn RF from the cached training data."
+        ),
+    )
     parser.add_argument(
         "--lane", type=int, default=None,
-        help="Lane index (default: None = all lanes concatenated)",
+        help="Lane index (default: None = all lanes concatenated).  Only used with --classifier-source sklearn.",
     )
-    parser.add_argument("--n-estimators", type=int, default=100)
+    parser.add_argument(
+        "--n-estimators", type=int, default=100,
+        help="Number of trees (only used with --classifier-source sklearn).",
+    )
     parser.add_argument("--n-jobs", type=int, default=-1)
     parser.add_argument("--random-state", type=int, default=42)
     args = parser.parse_args()
 
-    rf = fit_rf_from_ilp(
-        ilp_path=args.ilp,
-        lane=args.lane,
-        n_estimators=args.n_estimators,
-        n_jobs=args.n_jobs,
-        random_state=args.random_state,
-    )
+    if args.classifier_source == "vigra":
+        rf = extract_vigra_rf_from_ilp(args.ilp)
+    else:
+        rf = fit_rf_from_ilp(
+            ilp_path=args.ilp,
+            lane=args.lane,
+            n_estimators=args.n_estimators,
+            n_jobs=args.n_jobs,
+            random_state=args.random_state,
+        )
 
     with open(args.output, "wb") as f:
         pickle.dump(rf, f)

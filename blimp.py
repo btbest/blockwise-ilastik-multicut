@@ -89,8 +89,20 @@ def main():
 
     # Classifier parameters
     parser.add_argument(
+        "--classifier-source",
+        choices=["vigra", "sklearn"],
+        default="vigra",
+        help=(
+            "Where to get the edge classifier.  'vigra' (default) extracts the "
+            "already-trained vigra RF from the .ilp (identical to ilastik's own "
+            "predictions).  'sklearn' re-fits a new sklearn RF from the cached "
+            "training data.  If 'vigra' is selected but vigra is not installed, "
+            "falls back to 'sklearn' automatically."
+        ),
+    )
+    parser.add_argument(
         "--n-estimators", type=int, default=100,
-        help="Number of trees in the random forest (default: 100)",
+        help="Number of trees in the random forest (only used with --classifier-source sklearn; default: 100)",
     )
 
     # Watershed method
@@ -171,7 +183,7 @@ def main():
     args = parser.parse_args()
 
     # Lazy imports: only load heavy modules after argument parsing succeeds
-    from fit_classifier import fit_rf_from_ilp
+    from fit_classifier import extract_vigra_rf_from_ilp, fit_rf_from_ilp
     from ilp_reader import read_feature_names, read_wsdt_params
     from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_channel_spec, _run_lazy
 
@@ -257,17 +269,37 @@ def main():
     print(f"Parameters written to {params_file}")
 
     # -----------------------------------------------------------------------
-    # Step 1: Fit sklearn classifier from the .ilp training data
+    # Step 1: Load or fit the edge classifier
     # -----------------------------------------------------------------------
-    print("\n=== Step 1/3: Fitting classifier ===")
-    rf = fit_rf_from_ilp(
-        args.ilp,
-        n_estimators=args.n_estimators,
-        n_jobs=args.threads,
-    )
+    print("\n=== Step 1/3: Loading classifier ===")
+    classifier_source = args.classifier_source
+    if classifier_source == "vigra":
+        try:
+            rf = extract_vigra_rf_from_ilp(args.ilp)
+        except ImportError:
+            warnings.warn(
+                "vigra is not installed; falling back to --classifier-source sklearn.  "
+                "Install vigra (conda install -c ilastik-forge vigra) for "
+                "ilastik-identical predictions.",
+                stacklevel=1,
+            )
+            classifier_source = "sklearn"
+            rf = fit_rf_from_ilp(
+                args.ilp,
+                n_estimators=args.n_estimators,
+                n_jobs=args.threads,
+            )
+    else:
+        rf = fit_rf_from_ilp(
+            args.ilp,
+            n_estimators=args.n_estimators,
+            n_jobs=args.threads,
+        )
     with open(rf_pkl, "wb") as fh:
         pickle.dump(rf, fh)
     print(f"Classifier saved to {rf_pkl}")
+    params["classifier_source"] = classifier_source
+    params_file.write_text(json.dumps(params, indent=2) + "\n")
 
     # -----------------------------------------------------------------------
     # Step 2: Map --raw / --probabilities to the ILP channel names
