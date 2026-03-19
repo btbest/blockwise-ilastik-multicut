@@ -1,5 +1,5 @@
 """
-ilp-mc-block  –  single-command ilastik multicut pipeline
+blimp  –  single-command ilastik multicut pipeline
 
 Fits the sklearn classifier from the .ilp training data, then immediately runs
 the blockwise lazy multicut on the provided raw data and boundary probabilities.
@@ -15,7 +15,7 @@ Or pass ws-zarr to point to a precomputed watershed zarr.
 
 Usage
 -----
-    ilp-mc-block \\
+    blimp \\
         --ilp my_project.ilp \\
         --raw raw.zarr \\
         --probabilities boundaries.zarr \\
@@ -47,7 +47,7 @@ from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="ilp-mc-block",
+        prog="blimp",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -74,7 +74,7 @@ def main():
     parser.add_argument(
         "--max-block-shape", type=int, nargs=3, default=[256, 256, 256],
         metavar=("Z", "Y", "X"),
-        help="Maximum block shape; actual shape may be slightly smaller to satisfy "
+        help="Maximum block shape; ws-method=two-pass may reduce this to satisfy "
              "checkerboard requirements (default: 256 256 256)",
     )
     parser.add_argument(
@@ -109,9 +109,8 @@ def main():
             "vigra.labelMultiArray per block, cumulative offsets.  Produces "
             "pixel-identical superpixels to ilastik when the same boundary map "
             "and parameters are used.  "
-            "``two-pass``: elf checkerboard two-pass watershed (previous default; "
-            "uses --max-block-shape and --halo).  "
-            "``2d``: stacked 2-D watershed, recommended for strongly anisotropic data.  "
+            "``two-pass (experimental)``: elf checkerboard two-pass watershed (uses --max-block-shape and --halo).  "
+            "``2d (experimental)``: stacked 2-D watershed, for strongly anisotropic data.  "
             "When omitted, ``ilastik`` is used for projects with BlockwiseWatershed=True "
             "(all recent projects), ``two-pass`` for older projects that stored "
             "BlockwiseWatershed=False."

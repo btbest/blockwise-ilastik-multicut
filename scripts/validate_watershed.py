@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Compare label volumes from ilp-mc-block against ilastik reference.
+"""Compare label volumes from blimp against ilastik reference.
 
 Works for both watershed superpixels and final multicut segmentation.
 Use --mode to set expectations:
@@ -474,7 +474,7 @@ def main():
               %(prog)s output.zarr ref.h5 --slice-dir ./diffs --slices 50 100 150
         """),
     )
-    parser.add_argument("ours", help="Output from ilp-mc-block (.zarr or .h5)")
+    parser.add_argument("ours", help="Output from blimp (.zarr or .h5)")
     parser.add_argument("reference", help="Reference from ilastik (.zarr or .h5)")
     parser.add_argument("--mode", choices=["watershed", "segmentation"],
                         default="watershed",
