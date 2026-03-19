@@ -169,7 +169,8 @@ def main():
         print(f"Superpixels  : {n_superpixels}")
         print(f"Params       : {params_file}")
         print(f"\nTo use this watershed in a multicut run:")
-        print(f"  blimp --ws-zarr {ws_zarr_path} ...")
+        ilp_arg = f"--ilp {args.ilp}" if args.ilp else "--ilp <your_project.ilp>"
+        print(f"  blimp {ilp_arg} --raw {args.raw} --probabilities {args.probabilities} --output-dir {args.output_dir} --ws-zarr {ws_zarr_path}")
 
     finally:
         if boundary_fh is not None:
