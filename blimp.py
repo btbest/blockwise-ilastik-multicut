@@ -1,11 +1,11 @@
 """
 blimp  –  single-command ilastik multicut pipeline
 
-Loads the edge classifier from the .ilp (or re-fits one from training data),
-then immediately runs the blockwise lazy multicut on the provided raw data
-and boundary probabilities.  All outputs land in --output-dir:
+Fits the sklearn classifier from the .ilp training data, then immediately runs
+the blockwise lazy multicut on the provided raw data and boundary probabilities.
+All outputs land in --output-dir:
 
-    rf.pkl                          classifier pickle (only if --classifier-source sklearn)
+    rf.pkl                          sklearn random forest classifier
     <raw_stem>_segmentation.zarr    final segmentation (uint64, zyx)
     <raw_stem>_watershed.zarr       watershed superpixels
     params.json                     exact call parameters for reproducibility
@@ -37,8 +37,9 @@ import argparse
 import json
 import pickle
 import sys
-import warnings
 from pathlib import Path
+
+from _cli_params import add_blockwise_args, add_ws_args, resolve_ws_params
 
 
 def main():
@@ -66,93 +67,18 @@ def main():
         help="Directory for all outputs (created if it does not exist)",
     )
 
-    # Blockwise / multicut parameters
-    parser.add_argument(
-        "--max-block-shape", type=int, nargs=3, default=[256, 256, 256],
-        metavar=("Z", "Y", "X"),
-        help="Maximum block shape; ws-method=two-pass may reduce this to satisfy "
-             "checkerboard requirements (default: 256 256 256)",
-    )
-    parser.add_argument(
-        "--halo", type=int, nargs=3, default=[32, 32, 32],
-        metavar=("Z", "Y", "X"),
-        help="Halo (overlap) around each block (default: 32 32 32)",
-    )
+    # Shared blockwise and watershed parameters
+    add_blockwise_args(parser)
+    add_ws_args(parser)
+
+    # Shared blockwise and watershed parameters
+    add_blockwise_args(parser)
+    add_ws_args(parser)
+
+    # Multicut-specific parameters
     parser.add_argument(
         "--beta", type=float, default=0.5,
         help="Multicut edge-cost bias: <0.5 merges more, >0.5 splits more (default: 0.5)",
-    )
-    parser.add_argument(
-        "--threads", type=int, default=8,
-        help="Number of parallel threads for watershed and multicut (default: 8)",
-    )
-
-    # Classifier parameters
-    parser.add_argument(
-        "--classifier-source",
-        choices=["ilp", "sklearn"],
-        default="ilp",
-        help=(
-            "Where to get the edge classifier.  'ilp' (default) extracts the "
-            "already-trained vigra RF from the .ilp (identical to ilastik's own "
-            "predictions).  'sklearn' re-fits a new sklearn RF from the cached "
-            "training data."
-        ),
-    )
-    parser.add_argument(
-        "--n-estimators", type=int, default=100,
-        help="Number of trees in the random forest (only used with --classifier-source sklearn; default: 100)",
-    )
-
-    # Watershed method
-    parser.add_argument(
-        "--ws-method",
-        choices=["ilastik", "two-pass", "2d"],
-        default=None,
-        help=(
-            "Watershed algorithm to use.  "
-            "``ilastik`` (default): mirrors ilastik's parallel_watershed — "
-            "128³ blocks with 10-voxel halo, hard block boundaries, "
-            "vigra.labelMultiArray per block, cumulative offsets.  Produces "
-            "pixel-identical superpixels to ilastik when the same boundary map "
-            "and parameters are used.  "
-            "``two-pass (experimental)``: elf checkerboard two-pass watershed (uses --max-block-shape and --halo).  "
-            "``2d (experimental)``: stacked 2-D watershed, for strongly anisotropic data.  "
-            "When omitted, ``ilastik`` is used for projects with BlockwiseWatershed=True "
-            "(all recent projects), ``two-pass`` for older projects that stored "
-            "BlockwiseWatershed=False."
-        ),
-    )
-    parser.add_argument(
-        "--ws-threshold", type=float, default=None,
-        help="Boundary probability threshold for watershed seeds.  "
-             "Defaults to the value stored in the .ilp (or 0.5 if absent).",
-    )
-    parser.add_argument(
-        "--ws-sigma", type=float, default=None,
-        help="Gaussian smoothing sigma applied to the watershed seed and weight maps.  "
-             "Defaults to the value stored in the .ilp (or 3.0 if absent).",
-    )
-    parser.add_argument(
-        "--ws-min-size", type=int, default=None,
-        help="Minimum superpixel size in pixels; smaller segments are merged.  "
-             "Defaults to the value stored in the .ilp (or 100 if absent).",
-    )
-    parser.add_argument(
-        "--ws-alpha", type=float, default=None,
-        help="Blend factor (0–1) between the boundary map and the distance transform.  "
-             "Defaults to the value stored in the .ilp (or 0.9 if absent).",
-    )
-    parser.add_argument(
-        "--ws-invert", action="store_true", default=False,
-        help="Invert the boundary probability map (p → 1-p) before running the watershed.  "
-             "Use this when the probability file stores P(background) / P(interior) "
-             "(high = interior) instead of P(boundary) (high = membrane).  "
-             "elf's distance_transform_watershed expects high = boundary; this flag "
-             "flips the values so that convention is met.  "
-             "Equivalent to the 'Invert pixel probabilities' checkbox in ilastik's DT "
-             "Watershed applet.  This setting is not stored in the .ilp file, so it must "
-             "be set explicitly when needed.",
     )
     parser.add_argument(
         "--solver", default="kernighan-lin",
@@ -160,29 +86,16 @@ def main():
         help="Multicut internal solver (default: kernighan-lin)",
     )
 
-    # Watershed reuse
+    # Classifier parameters
     parser.add_argument(
-        "--ws-zarr", default=None, metavar="PATH",
-        help=(
-            "Path to a pre-computed watershed zarr.  If supplied and valid the "
-            "watershed step is skipped entirely — useful for re-running only the "
-            "multicut with different parameters.  Implies --keep-watershed."
-        ),
-    )
-    parser.add_argument(
-        "--keep-watershed", action=argparse.BooleanOptionalAction, default=True,
-        help=(
-            "Keep the watershed zarr after the run (default: keep it).  "
-            "Pass --no-keep-watershed to delete it.  "
-            "The zarr is written to <output-dir>/<raw-stem>_watershed.zarr "
-            "and can be passed to --ws-zarr on a subsequent run."
-        ),
+        "--n-estimators", type=int, default=100,
+        help="Number of trees in the random forest (default: 100)",
     )
 
     args = parser.parse_args()
 
     # Lazy imports: only load heavy modules after argument parsing succeeds
-    from fit_classifier import extract_vigra_rf_from_ilp, fit_rf_from_ilp
+    from fit_classifier import fit_rf_from_ilp
     from ilp_reader import read_feature_names, read_wsdt_params
     from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_channel_spec, _run_lazy
 
@@ -190,32 +103,7 @@ def main():
     # Read DT Watershed parameters from the .ilp; CLI flags override them.
     # -----------------------------------------------------------------------
     ilp_ws = read_wsdt_params(args.ilp)
-    ws_threshold    = args.ws_threshold if args.ws_threshold is not None else ilp_ws["threshold"]
-    ws_sigma        = args.ws_sigma     if args.ws_sigma     is not None else ilp_ws["sigma"]
-    ws_min_size     = args.ws_min_size  if args.ws_min_size  is not None else ilp_ws["min_size"]
-    ws_alpha        = args.ws_alpha     if args.ws_alpha     is not None else ilp_ws["alpha"]
-    ws_invert       = args.ws_invert    # not stored in .ilp; always explicit
-    ws_pixel_pitch  = ilp_ws["pixel_pitch"]   # not overridable via CLI for now
-    ws_apply_nonmax = False                    # ApplyNonmaxSuppression; not serialised
-
-    # Choose watershed method.  If the user didn't specify one explicitly,
-    # default to "ilastik" for modern projects (BlockwiseWatershed=True) and
-    # warn + fall back to "two-pass" for old ones (BlockwiseWatershed=False),
-    # because those ran on the full crop at once — something we can't replicate
-    # blockwise without loading the entire volume into RAM.
-    if args.ws_method is not None:
-        ws_method = args.ws_method
-    elif ilp_ws["blockwise"]:
-        ws_method = "ilastik"
-    else:
-        warnings.warn(
-            "The .ilp was saved with BlockwiseWatershed=False (an old project). "
-            "ilastik ran the watershed on the full training crop at once, which we "
-            "cannot replicate blockwise.  Falling back to 'two-pass'.  Pass "
-            "--ws-method explicitly to suppress this warning.",
-            stacklevel=1,
-        )
-        ws_method = "two-pass"
+    ws = resolve_ws_params(args, ilp_ws)
 
     # -----------------------------------------------------------------------
     # Setup output directory and output paths
@@ -250,16 +138,15 @@ def main():
         "halo":           args.halo,
         "beta":           args.beta,
         "threads":        args.threads,
-        "classifier_source": args.classifier_source,
         "n_estimators":   args.n_estimators,
-        "ws_method":      ws_method,
-        "ws_threshold":   ws_threshold,
-        "ws_sigma":       ws_sigma,
-        "ws_min_size":    ws_min_size,
-        "ws_alpha":       ws_alpha,
-        "ws_pixel_pitch": ws_pixel_pitch,
-        "ws_apply_nonmax": ws_apply_nonmax,
-        "ws_invert":      ws_invert,
+        "ws_method":      ws.ws_method,
+        "ws_threshold":   ws.ws_threshold,
+        "ws_sigma":       ws.ws_sigma,
+        "ws_min_size":    ws.ws_min_size,
+        "ws_alpha":       ws.ws_alpha,
+        "ws_pixel_pitch": ws.ws_pixel_pitch,
+        "ws_apply_nonmax": ws.ws_apply_nonmax,
+        "ws_invert":      ws.ws_invert,
         "solver":         args.solver,
         "ws_zarr":        ws_zarr_path,
         "keep_watershed": keep_watershed,
@@ -269,21 +156,17 @@ def main():
     print(f"Parameters written to {params_file}")
 
     # -----------------------------------------------------------------------
-    # Step 1: Load or fit the edge classifier
+    # Step 1: Fit sklearn classifier from the .ilp training data
     # -----------------------------------------------------------------------
-    print("\n=== Step 1/3: Loading classifier ===")
-    if args.classifier_source == "ilp":
-        rf = extract_vigra_rf_from_ilp(args.ilp)
-    else:
-        rf = fit_rf_from_ilp(
-            args.ilp,
-            n_estimators=args.n_estimators,
-            n_jobs=args.threads,
-        )
-        # Only pickle the sklearn classifier; vigra one is already in the .ilp
-        with open(rf_pkl, "wb") as fh:
-            pickle.dump(rf, fh)
-        print(f"Classifier saved to {rf_pkl}")
+    print("\n=== Step 1/3: Fitting classifier ===")
+    rf = fit_rf_from_ilp(
+        args.ilp,
+        n_estimators=args.n_estimators,
+        n_jobs=args.threads,
+    )
+    with open(rf_pkl, "wb") as fh:
+        pickle.dump(rf, fh)
+    print(f"Classifier saved to {rf_pkl}")
 
     # -----------------------------------------------------------------------
     # Step 2: Map --raw / --probabilities to the ILP channel names
@@ -307,14 +190,14 @@ def main():
     # Step 3: Run blockwise lazy multicut
     # -----------------------------------------------------------------------
     print("\n=== Step 3/3: Running blockwise multicut ===")
-    print(f"  Watershed method   : {ws_method}")
+    print(f"  Watershed method   : {ws.ws_method}")
     print(f"  Watershed parameters (from .ilp unless overridden):")
-    print(f"    threshold   : {ws_threshold}")
-    print(f"    sigma       : {ws_sigma}")
-    print(f"    min_size    : {ws_min_size}")
-    print(f"    alpha       : {ws_alpha}")
-    print(f"    pixel_pitch : {ws_pixel_pitch}")
-    print(f"    invert      : {ws_invert}")
+    print(f"    threshold   : {ws.ws_threshold}")
+    print(f"    sigma       : {ws.ws_sigma}")
+    print(f"    min_size    : {ws.ws_min_size}")
+    print(f"    alpha       : {ws.ws_alpha}")
+    print(f"    pixel_pitch : {ws.ws_pixel_pitch}")
+    print(f"    invert      : {ws.ws_invert}")
     _run_lazy(
         ilp_path=args.ilp,
         rf=rf,
@@ -326,14 +209,14 @@ def main():
         halo=list(args.halo),
         internal_solver=args.solver,
         n_threads=args.threads,
-        ws_method=ws_method,
-        ws_threshold=ws_threshold,
-        ws_sigma=ws_sigma,
-        ws_min_size=ws_min_size,
-        ws_alpha=ws_alpha,
-        ws_pixel_pitch=ws_pixel_pitch,
-        ws_apply_nonmax=ws_apply_nonmax,
-        ws_invert=ws_invert,
+        ws_method=ws.ws_method,
+        ws_threshold=ws.ws_threshold,
+        ws_sigma=ws.ws_sigma,
+        ws_min_size=ws.ws_min_size,
+        ws_alpha=ws.ws_alpha,
+        ws_pixel_pitch=ws.ws_pixel_pitch,
+        ws_apply_nonmax=ws.ws_apply_nonmax,
+        ws_invert=ws.ws_invert,
         ws_zarr_path=ws_zarr_path,
         keep_watershed=keep_watershed,
     )
