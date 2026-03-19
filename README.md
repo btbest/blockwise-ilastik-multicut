@@ -2,7 +2,9 @@
 
 Run edge classifiers trained in ilastik on large 3D volumes.
 
-**blimp** is a command-line tool that takes a trained ilastik project, raw data, and boundary predictions—then outputs a final segmentation. It's fast, memory-efficient, and works with volumes too large to fit in RAM.
+**blimp** is a command-line tool that takes a trained ilastik project, raw data, and boundary predictions—then outputs a final segmentation. The blockwise implementation allows it to handle volumes too large to fit in RAM.
+
+Terabyte-scale stress testing to be done :)
 
 ---
 
@@ -21,7 +23,11 @@ Before running blimp, gather three things:
 ## Installation
 
 ```bash
-# Create the conda environment (installs dependencies)
+# Download
+git clone https://github.com/btbest/blockwise-ilastik-multicut.git
+cd blockwise-ilastik-multicut
+
+# Create conda environment (installs dependencies)
 conda env create -n blimp -f environment.yml
 conda activate blimp
 
@@ -29,28 +35,30 @@ conda activate blimp
 pip install -e .
 ```
 
-The `blimp` command will now be available on your PATH.
+The `blimp` command will now be available.
 
 ---
 
-## Quick start
+## Run
+
+`cd` to the folder with your data and the `.ilp`.
 
 ```bash
 blimp \
     --ilp my_project.ilp \
     --raw raw.zarr \
     --probabilities boundary.zarr \
-    --output-dir results/
+    --output-dir multicut_results/
 ```
 
-**Output files in `results/`:**
+**Output files in `multicut_results/`:**
 
 | File | Contents |
 |------|----------|
 | `raw_segmentation.zarr` | Final segmentation (uint64, zyx) |
 | `rf.pkl` | Fitted classifier |
 | `params.json` | Call parameters for reproducibility |
-| `raw_watershed.zarr` | Watershed superpixels |
+| `raw_watershed.zarr` | Watershed superpixels (for debug or reuse) |
 
 ### Input formats
 
@@ -58,9 +66,10 @@ Both `--raw` and `--probabilities` accept:
 
 - **zarr:** `/path/to/file.zarr`
 - **HDF5:** `/path/to/file.h5` (must contain exactly one dataset)
-- **Windows paths:** `C:\Users\...\file.h5`
 
-Volumes must be in **zyx(c) axis order** with the **same shape**. Singleton channels are OK.
+Windows paths like `C:\Users\...\file.h5` are fine.
+
+Volumes must be in **zyx(c) axis order** with the **same shape**. (ilastik-typical trailing singleton axis is ignored)
 
 ---
 
