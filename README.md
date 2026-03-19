@@ -111,7 +111,7 @@ blimp \
 | File | Contents |
 |------|----------|
 | `raw_segmentation.zarr` | Final segmentation (uint64, zyx) |
-| `rf.pkl` | Fitted classifier |
+| `rf.pkl` | Fitted sklearn classifier (only if `--classifier-source sklearn`) |
 | `params.json` | Call parameters for reproducibility |
 | `raw_watershed.zarr` | Watershed superpixels (for debug or reuse) |
 
@@ -165,7 +165,10 @@ Blockwise multicut:
                               (default: kernighan-lin)
 
 Classifier:
-  --n-estimators INT          Random forest trees (default: 100)
+  --classifier-source         ilp | sklearn (default: ilp)
+                              'ilp': extract trained classifier from .ilp
+                              'sklearn': re-fit from training data
+  --n-estimators INT          RF trees (only with --classifier-source sklearn; default: 100)
 
 Watershed:
   --ws-threshold FLOAT        Seed threshold (default: from .ilp or 0.5)
