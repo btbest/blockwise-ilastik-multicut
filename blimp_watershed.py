@@ -148,7 +148,7 @@ def main():
             else boundary_lazy
         )
 
-        ws_zarr_arr, n_superpixels = _open_or_compute_watershed_zarr(
+        _, n_superpixels = _open_or_compute_watershed_zarr(
             ws_zarr_path=ws_zarr_path,
             boundary_lazy=ws_input,
             vol_shape=vol_shape,
@@ -166,7 +166,7 @@ def main():
 
         print(f"\n=== Done ===")
         print(f"Watershed    : {ws_zarr_path}")
-        print(f"Superpixels  : {n_superpixels}")
+        print(f"Superpixels  : {n_superpixels or 'Unknown'}")
         print(f"Params       : {params_file}")
         print(f"\nTo use this watershed in a multicut run:")
         ilp_arg = f"--ilp {args.ilp}" if args.ilp else "--ilp <your_project.ilp>"

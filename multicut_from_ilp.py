@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import warnings
+from typing import Optional, Tuple
 
 import h5py
 import numpy as np
@@ -516,7 +517,7 @@ def _ilastik_parallel_watershed(
     from elf.segmentation.watershed import distance_transform_watershed
 
     ndim = len(vol_shape)
-    assert ndim in [2, 3], "Watershed segmentor will only work on 2D and 3D data"
+    assert ndim in [2, 3], f"Watershed segmentor will only work on 2D and 3D data, got shape {vol_shape!r}"
     # These are ilastik's hard-coded defaults for 3-D data (block_shape=None,
     # halo=None paths in parallel_watershed / get_blocking).
     BLOCK_SHAPE = (128,) * ndim
@@ -593,7 +594,7 @@ def _open_or_compute_watershed_zarr(
     ws_method, ws_threshold, ws_sigma, ws_min_size, ws_alpha,
     ws_pixel_pitch, ws_apply_nonmax,
     n_threads,
-):
+) -> Tuple["zarr.Array", Optional[int]]:
     """Return an open zarr array containing the watershed and the node count.
 
     The zarr stores **0-indexed** superpixel labels (0 … n_superpixels-1).
@@ -627,28 +628,27 @@ def _open_or_compute_watershed_zarr(
     from pathlib import Path as _Path
 
     # --- Try to reuse an existing watershed zarr ---
+    expected_dataset_name = "s0"
     if os.path.exists(ws_zarr_path):
         try:
             existing_group = zarr.open_group(ws_zarr_path, mode="r")
-            existing = existing_group["s0"]
-            if (
-                tuple(existing.shape) == tuple(vol_shape)
-                and "n_superpixels" in existing.attrs
-            ):
-                n_superpixels = int(existing.attrs["n_superpixels"])
-                print(
-                    f"Reusing existing watershed zarr: {ws_zarr_path} "
-                    f"({n_superpixels} superpixels) — skipping computation"
-                )
-                return existing, n_superpixels
-            print(
-                f"  Existing {ws_zarr_path!r} has wrong shape or missing "
-                f"attribute, recomputing …"
-            )
+            existing = existing_group[expected_dataset_name]
         except Exception as exc:
-            print(
-                f"  Could not open {ws_zarr_path!r} ({exc}), recomputing …"
+            raise ValueError(
+                f"  Could not open {ws_zarr_path!r} (Expected zarr group "
+                f"with a dataset {expected_dataset_name!r}). Message: {exc}"
+            ) from exc
+
+        if tuple(existing.shape) != tuple(vol_shape):
+            raise ValueError(
+                f"  Existing {ws_zarr_path!r} has wrong shape "
+                f"(expected {tuple(vol_shape)}, found {existing.shape})"
             )
+        print(
+            f"Reusing existing watershed zarr: {ws_zarr_path} — skipping computation"
+        )
+        n_superpixels = existing.attrs.get("n_superpixels")
+        return existing, n_superpixels
 
     print(f"Computing watershed ({ws_method!r} method) → {ws_zarr_path} …")
 
@@ -958,7 +958,12 @@ def _run_lazy(
             )
         boundary_lazy = _Float32LazyArray(lazy_arrays[boundary_channel])
         vol_shape = tuple(boundary_lazy.shape)
-        print(f"Volume shape: {vol_shape}")
+        if not(len(vol_shape) == 3 or (len(vol_shape) == 4 and vol_shape[-1] == 1)):
+            raise ValueError(
+                "Boundary probability volume must be 3D or contain exactly one channel (last axis). "
+                f"Got shape: {vol_shape!r}"
+            )
+        print(f"Boundary probabilities shape: {vol_shape}")
 
         # --- Diagnostic: sample a small central patch to verify probability ---
         # convention.  elf's distance_transform_watershed expects high values
@@ -1000,7 +1005,8 @@ def _run_lazy(
 
         blocking = nt.blocking([0, 0, 0], list(vol_shape), list(block_shape))
         n_blocks = blocking.numberOfBlocks
-        print(f"Watershed complete: {n_superpixels} superpixels across {n_blocks} blocks.")
+        sp_str = f": {n_superpixels} superpixels across {n_blocks} blocks." if n_superpixels else "."
+        print(f"Watershed complete{sp_str}")
 
         # --- Blockwise feature computation ---
         # Accumulate edge arrays as numpy per block rather than building a Python
@@ -1068,6 +1074,14 @@ def _run_lazy(
         all_costs_arr = np.concatenate(all_costs_list, axis=0)  # (M,)   float32
         del all_edges_list, all_costs_list
 
+        max_edge_node = int(all_edges.max())
+        if n_superpixels:  # Node IDs should be consecutive 1…n_superpixels
+            assert max_edge_node == n_superpixels, (
+                f"Watershed claims to have {n_superpixels} superpixels, but "
+                f"max node ID in edges is {max_edge_node}."
+            )
+        else:
+            n_superpixels = max_edge_node
         key = all_edges[:, 0] * np.uint64(n_superpixels) + all_edges[:, 1]
         order = np.argsort(key, kind="stable")
         key           = key[order]
@@ -1088,11 +1102,6 @@ def _run_lazy(
 
         print(f"  {len(edge_uvs)} unique edges after deduplication.")
 
-        max_edge_node = int(edge_uvs.max())  # Node IDs should be 1-indexed like superpixels
-        assert max_edge_node == n_superpixels, (
-            f"Watershed claims to have {n_superpixels} superpixels, but "
-            f"max node ID in edges is {max_edge_node}."
-        )
         # ws_zarr_arr contains 1-indexed labels (1…n_superpixels).
         # nifty graph needs one extra node for a non-existent "background" superpixels (ID=0),
         # because this is what blockwise_multicut expects
