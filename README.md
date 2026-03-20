@@ -4,6 +4,8 @@ Run edge classifiers trained in ilastik on large 3D volumes.
 
 **blimp** is a command-line tool that takes a trained ilastik project, raw data, and boundary predictions—then outputs a final segmentation. The blockwise implementation allows it to handle volumes too large to fit in RAM. Terabyte-scale datasets are supported; stress testing is ongoing.
 
+Terabyte-scale stress testing to be done :)
+
 ---
 
 ## Quickstart
@@ -83,8 +85,8 @@ Use the "Boundary-Based Segmentation with Multicut" workflow:
   * But you cannot later insert boundaries afterwards where there are none, and you cannot redraw boundaries if they are slightly off.
 * Multicut: Train the classifier on all of your subvolumes.
   Remember:
-  * Left mouse button: Mark as bad boundary
-  * Right mouse button: Mark as good boundary
+  * Left mouse button: Mark as bad boundary ("**L**ose it")
+  * Right mouse button: Mark as good boundary ("**R**emain")
 * There is no need to actually export segmentations. Just save the project file and take it into blimp.
 
 ---
@@ -197,7 +199,7 @@ Reuse watershed:
 
 ---
 
-## Workflow Overview
+## Pipeline Overview
 
 ```
 Raw Data (HDF5/Zarr)
@@ -213,53 +215,8 @@ Final Segmentation
 
 **Data Requirements:**
 - Raw volume and boundary probabilities must have the same shape
-- All data must be in zyx (z=depth, y=height, x=width) axis order
-- Supported formats: HDF5 (.h5), OME-Zarr (.zarr)
-
----
-
-## FAQ & Troubleshooting
-
-### Common Issues
-
-**Axis order mismatch**
-If your segmentation looks distorted or wrong, verify that your raw data and boundary probabilities are in **zyx order** (not xyz or other). Check with tools like `h5py` or `zarr` to inspect array shapes.
-
-**Memory errors during watershed**
-The watershed uses ilastik's block size (128×128×128). If you run out of memory:
-- Ensure your machine has sufficient RAM for blockwise processing
-- Consider reducing your dataset resolution temporarily to test
-- The multicut phase uses `--max-block-shape` which you can adjust (default: 256×256×256)
-
-**ilastik project compatibility**
-- Your `.ilp` file must come from the **"Boundary-Based Segmentation with Multicut"** workflow
-- Other workflows (Pixel Classification, Autocontext, etc.) are **not** compatible
-- The project must be trained with boundary/membrane labels
-
-### Performance Tips
-
-**Block size and halo selection:**
-- Larger blocks (`--max-block-shape`) reduce overhead but use more memory
-- Larger halo (`--halo`) improves boundary handling but increases computation
-- Default values (256×256×256 blocks, 32×32×32 halo) work well for most datasets
-- Start with defaults; reduce block size if you hit memory limits
-
-**Parallel threads:**
-- Adjust `--threads` based on your CPU core count (default: 8)
-- More threads speed up processing but increase memory usage
-- Typical sweet spot: 4–16 threads depending on your machine
-
-**Pre-computed watershed:**
-- Reuse a pre-computed watershed with `--ws-zarr` to skip that step in re-runs
-- Useful when tuning multicut parameters without re-running the expensive watershed phase
-
-### Other Issues
-
-**"Axis order mismatch" warnings** — This usually means your data is not in zyx order. Use tools like BigDataViewer, MoBIE, or simple Python scripts to verify and transpose if needed.
-
-**Slow watershed step** — This is normal for large volumes. Consider breaking the dataset into tiles and processing separately if needed.
-
-**Out of memory during multicut** — Reduce `--max-block-shape` (e.g., to 128 128 128) to use smaller blocks.
+- All data must be in zyx axis order (zyxc is accepted if single-channel)
+- Supported formats: HDF5 (.h5), OME-Zarr (.zarr - currently expects a dataset called "s0")
 
 ---
 
