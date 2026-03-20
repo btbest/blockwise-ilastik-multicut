@@ -201,14 +201,6 @@ def _split_merge_analysis(a: np.ndarray, b: np.ndarray, *,
 # Diff saving / visualization
 # ---------------------------------------------------------------------------
 
-def _save_diff_zarr(path: str, diff_mask: np.ndarray):
-    """Save the boolean diff mask as a uint8 zarr array."""
-    import zarr
-
-    z = zarr.open(path, mode="w", shape=diff_mask.shape, dtype="uint8", chunks=(128, 128, 128))
-    z[:] = diff_mask.astype(np.uint8)
-    print(f"  Diff mask saved to {path}")
-
 
 def _save_slice_images(a: np.ndarray, b: np.ndarray, diff_mask: np.ndarray,
                        slices: list[int], out_dir: str):
@@ -250,7 +242,6 @@ def _save_slice_images(a: np.ndarray, b: np.ndarray, diff_mask: np.ndarray,
 
 def validate(ours_path: str, ref_path: str, *,
              mode: str = "watershed",
-             save_diff: str | None = None,
              slices: list[int] | None = None,
              slice_dir: str | None = None,
              top_n_slices: int = 10):
@@ -437,9 +428,6 @@ def validate(ours_path: str, ref_path: str, *,
     print()
 
     # -- 12. Save outputs --------------------------------------------------
-    if save_diff:
-        _save_diff_zarr(save_diff, diff_mask)
-
     if slices is not None and slice_dir:
         _save_slice_images(ours, ref, diff_mask, slices, slice_dir)
     elif slices is None and worst and slice_dir:
@@ -481,12 +469,10 @@ def main():
                         help="Validation mode: 'watershed' requires pixel-identical "
                              "labels; 'segmentation' accepts bijective relabeling "
                              "(default: watershed)")
-    parser.add_argument("--save-diff", metavar="PATH",
-                        help="Save boolean diff mask as a zarr array")
-    parser.add_argument("--slices", type=int, nargs="*", metavar="Z",
-                        help="Z-slices to render as PNGs (default: worst 5)")
     parser.add_argument("--slice-dir", metavar="DIR", default=None,
                         help="Directory for slice PNG output (enables image saving)")
+    parser.add_argument("--slices", type=int, nargs="*", metavar="Z",
+                        help="Z-slices to render as PNGs (default: worst 5)")
     parser.add_argument("--top-n-slices", type=int, default=10,
                         help="Number of worst slices to show in the report (default: 10)")
 
@@ -495,7 +481,6 @@ def main():
         args.ours,
         args.reference,
         mode=args.mode,
-        save_diff=args.save_diff,
         slices=args.slices,
         slice_dir=args.slice_dir,
         top_n_slices=args.top_n_slices,
