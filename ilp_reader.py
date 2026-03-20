@@ -51,6 +51,38 @@ WSDT_GROUP = "DT Watershed"
 # ---------------------------------------------------------------------------
 
 
+def _open_ilp_file(ilp_path: str, mode: str = "r"):
+    """
+    Open an ilastik .ilp file with friendly error message if file is locked.
+
+    Parameters
+    ----------
+    ilp_path : str
+        Path to the .ilp file
+    mode : str
+        File mode (default "r" for read-only)
+
+    Returns
+    -------
+    h5py.File
+        The opened HDF5 file object
+
+    Raises
+    ------
+    OSError
+        If the file is already open in ilastik (file lock error) or other I/O issues
+    """
+    try:
+        return h5py.File(ilp_path, mode)
+    except OSError as e:
+        if "unable to lock file" in str(e) or (hasattr(e, 'winerror') and e.winerror == 33):
+            raise OSError(
+                f"The project file is already open in ilastik: {ilp_path}\n"
+                f"Please close the file in ilastik before running this command."
+            ) from e
+        raise
+
+
 def _decode(v):
     """Decode bytes to str, leave other types unchanged."""
     if isinstance(v, (bytes, np.bytes_)):
@@ -107,7 +139,7 @@ def discover_lanes(ilp_path: str) -> list:
     -------
     list[int]  e.g. [0, 1, 2]
     """
-    with h5py.File(ilp_path, "r") as f:
+    with _open_ilp_file(ilp_path) as f:
         keys = list(f[APPLET_GROUP]["EdgeLabelsDict"].keys())
     # keys look like "EdgeLabels0000"; strip the prefix to get the index
     return sorted(int(k[len("EdgeLabels"):]) for k in keys)
@@ -137,7 +169,7 @@ def read_feature_names(ilp_path: str) -> dict:
     }
     """
     result = {}
-    with h5py.File(ilp_path, "r") as f:
+    with _open_ilp_file(ilp_path) as f:
         fn_group = f[APPLET_GROUP]["FeatureNames"]
         for channel_name, item in fn_group.items():
             channel_name = _decode(channel_name)
@@ -191,7 +223,7 @@ def read_wsdt_params(ilp_path: str) -> dict:
         "blockwise": True,    # False only for very old projects (pre-v0.2 serialiser)
     }
     try:
-        with h5py.File(ilp_path, "r") as f:
+        with _open_ilp_file(ilp_path) as f:
             if WSDT_GROUP not in f:
                 return dict(defaults)
             g = f[WSDT_GROUP]
@@ -237,7 +269,7 @@ def read_edge_labels(ilp_path: str, lane: int = 0) -> dict:
     active when the user annotated the data inside ilastik.
     """
     subname = f"EdgeLabels{lane:04d}"
-    with h5py.File(ilp_path, "r") as f:
+    with _open_ilp_file(ilp_path) as f:
         group = f[APPLET_GROUP]["EdgeLabelsDict"][subname]
         sp_ids = group["sp_ids"][()]   # (N, 2) uint32
         labels = group["labels"][()]   # (N,)   uint8
@@ -261,7 +293,7 @@ def read_edge_features(ilp_path: str, lane: int = 0) -> pd.DataFrame:
     been triggered).  If absent, a KeyError is raised.
     """
     subname = f"{lane:04d}"
-    with h5py.File(ilp_path, "r") as f:
+    with _open_ilp_file(ilp_path) as f:
         ef_group = f[APPLET_GROUP]["EdgeFeatures"][subname]
         df = _dataframe_from_hdf5(ef_group)
     return df
