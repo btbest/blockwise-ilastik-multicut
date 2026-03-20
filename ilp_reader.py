@@ -75,7 +75,16 @@ def _open_ilp_file(ilp_path: str, mode: str = "r"):
     try:
         return h5py.File(ilp_path, mode)
     except OSError as e:
-        if "unable to lock file" in str(e) or (hasattr(e, 'winerror') and e.winerror == 33):
+        error_msg = str(e).lower()
+        # Windows (error 33 = ERROR_LOCK_VIOLATION)
+        is_windows_lock = hasattr(e, 'winerror') and e.winerror == 33
+        # Unix/macOS errors: "unable to lock", "resource busy", "device or resource busy"
+        is_unix_lock = (
+            "unable to lock" in error_msg
+            or "resource busy" in error_msg
+            or e.errno in (16, 13)  # EBUSY=16, EACCES=13
+        )
+        if is_windows_lock or is_unix_lock:
             raise OSError(
                 f"The project file is already open in ilastik: {ilp_path}\n"
                 f"Please close the file in ilastik before running this command."
