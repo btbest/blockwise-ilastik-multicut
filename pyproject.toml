@@ -9,11 +9,15 @@ requires-python = ">=3.10"
 
 [project.scripts]
 blimp = "blimp:main"
+blimp-watershed = "blimp_watershed:main"
 
 [tool.setuptools]
 # Treat each top-level .py file as an importable module (no package directory).
 py-modules = [
     "blimp",
+    "blimp_watershed",
+    "_cli_params",
+    "_cli_helpers",
     "ilp_reader",
     "fit_classifier",
     "multicut_from_ilp",
