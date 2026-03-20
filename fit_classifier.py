@@ -43,7 +43,7 @@ import h5py
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
-from ilp_reader import read_feature_names, read_training_data
+from ilp_reader import read_feature_names, read_training_data, _open_ilp_file
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +116,7 @@ def extract_vigra_rf_from_ilp(ilp_path: str) -> VigraRfSklearnWrapper:
     cache_path = os.path.join(tmp_dir, "tmp_classifier_cache.h5").replace("\\", "/")
 
     try:
-        with h5py.File(ilp_path, "r") as h5:
+        with _open_ilp_file(ilp_path) as h5:
             src = h5["Training and Multicut/Output"]
 
             # Copy forest data to temp file
