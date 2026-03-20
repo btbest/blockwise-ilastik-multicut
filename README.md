@@ -2,7 +2,7 @@
 
 Run edge classifiers trained in ilastik on large 3D volumes.
 
-**blimp** is a command-line tool that takes a trained ilastik project, raw data, and boundary predictions—then outputs a final segmentation. The blockwise implementation allows it to handle volumes too large to fit in RAM. Terabyte-scale datasets are supported; stress testing is ongoing.
+**blimp** is a command-line tool that takes a trained ilastik project, raw data, and boundary predictions—then outputs a final segmentation. The blockwise implementation allows it to handle volumes too large to fit in RAM.
 
 Terabyte-scale stress testing to be done :)
 
