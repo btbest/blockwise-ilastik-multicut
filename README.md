@@ -8,6 +8,23 @@ Terabyte-scale stress testing to be done :)
 
 ---
 
+## Quickstart
+
+Get a segmentation from your raw data and trained ilastik project in one command:
+
+```bash
+blimp --ilp project.ilp --raw raw.zarr --probabilities boundary.zarr --output-dir results/
+```
+
+Output files in `results/`:
+- `raw_segmentation.zarr` — Your final segmentation
+- `params.json` — Parameters used (for reproducibility)
+- `raw_watershed.zarr` — Watershed superpixels (optional reuse)
+
+For detailed options and workflows, see below.
+
+---
+
 ## What you need
 
 Before running blimp, gather three things:
@@ -68,8 +85,8 @@ Use the "Boundary-Based Segmentation with Multicut" workflow:
   * But you cannot later insert boundaries afterwards where there are none, and you cannot redraw boundaries if they are slightly off.
 * Multicut: Train the classifier on all of your subvolumes.
   Remember:
-  * Left mouse button: Lose it (bad boundary)
-  * Right mouse button: Remain (good boundary)
+  * Left mouse button: Mark as bad boundary ("**L**ose it")
+  * Right mouse button: Mark as good boundary ("**R**emain")
 * There is no need to actually export segmentations. Just save the project file and take it into blimp.
 
 ---
@@ -182,6 +199,27 @@ Reuse watershed:
 
 ---
 
+## Pipeline Overview
+
+```
+Raw Data (HDF5/Zarr)
+      ↓
+      ├→ Watershed Segmentation (from boundary probabilities)
+      ↓
+Superpixels
+      ↓
+      ├→ Blockwise Multicut (using trained classifier)
+      ↓
+Final Segmentation
+```
+
+**Data Requirements:**
+- Raw volume and boundary probabilities must have the same shape
+- All data must be in zyx axis order (zyxc is accepted if single-channel)
+- Supported formats: HDF5 (.h5), OME-Zarr (.zarr - currently expects a dataset called "s0")
+
+---
+
 ## For developers
 
 See [AGENTS.md](AGENTS.md) for:
@@ -195,4 +233,4 @@ See [AGENTS.md](AGENTS.md) for:
 
 ## License
 
-See LICENSE file.
+blimp is released under the **GNU General Public License v3 (GPLv3)**. See the [LICENSE](LICENSE) file for details.
