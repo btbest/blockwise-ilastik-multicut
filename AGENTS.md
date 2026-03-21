@@ -1,12 +1,26 @@
 # Agent setup
 
+**Important:** Files in `libs/` are for reference only and must never be modified. They are snapshots corresponding to relevant/installed versions of the packages.
+
+## micromamba (Linux x86_64)
+
+```bash
+# Preferred (if micro.mamba.pm is reachable):
+"${SHELL}" <(curl -L micro.mamba.pm/install.sh)
+ 
+# Fallback via GitHub releases:
+mkdir -p ~/bin
+curl -L https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64 \
+     -o ~/bin/micromamba && chmod +x ~/bin/micromamba
+
 ## Environment
 
 Create and activate the environment (from repo root):
 
 ```bash
 micromamba create -f environment.yml -n blimp -y
-/path/to/micromamba/bin/python -m pip install -e .
+micromamba activate blimp
+pip install -e .
 ```
 
 Verify installation:
@@ -15,22 +29,11 @@ Verify installation:
 blimp -h
 ```
 
-**Important:** Files in `libs/` are external dependencies and must never be modified.
-
-
 ## Tests
 
 ```bash
 pytest tests/
 ```
-
-## Demo (end-to-end on synthetic data)
-
-```bash
-python run_demo.py          # writes output to /tmp/blockwise_mc_demo/
-```
-
----
 
 # blimp — Developer Documentation
 
@@ -43,12 +46,12 @@ ilastik's interactive training UX makes it easy to annotate superpixel edges as 
 blimp bridges these two:
 
 1. **Reads** edge training data from ilastik `.ilp` project files
-2. **Re-fits** a `sklearn.RandomForestClassifier` using cached ilastikrag feature vectors (no re-computation needed)
+2. **Loads** the serialized `vigra.learning.RandomForest`s, or re-fits an `sklearn.RandomForestClassifier` using cached ilastikrag feature vectors (no re-computation needed)
 3. **Processes** volumes blockwise at inference time: each block computes watershed and features independently (bounded RAM), predicts edges, then elf's solver assembles the final segmentation
 
 ## Architecture
 
-### Training step (runs once on the `.ilp` file)
+### Training step if re-fitting (runs once on the `.ilp` file)
 
 ```
 .ilp  (trained on N crops / lanes)
@@ -171,7 +174,7 @@ conda install -c conda-forge scikit-learn h5py zarr nifty
 pip install elf
 ```
 
-`vigra` is only needed at inference time (RAG construction). Not needed for re-fitting or reading training data.
+`vigra` is mainly needed at inference time (RAG construction), and for loading saved crandom forests. Not needed if re-fitting or for reading training data.
 
 ## Memory usage
 
