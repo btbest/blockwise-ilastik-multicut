@@ -2,37 +2,20 @@
 
 ## Environment
 
-Install micromamba (Linux x86_64):
+Create and activate the environment (from repo root):
 
 ```bash
-# Preferred (if micro.mamba.pm is reachable):
-"${SHELL}" <(curl -L micro.mamba.pm/install.sh)
-
-# Fallback via GitHub releases:
-mkdir -p ~/bin
-curl -L https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64 \
-     -o ~/bin/micromamba && chmod +x ~/bin/micromamba
-export MAMBA_ROOT_PREFIX=~/micromamba
+micromamba create -f environment.yml -n blimp -y
+/path/to/micromamba/bin/python -m pip install -e .
 ```
 
-Create and activate the env (from repo root):
-
-1. Modify environment.yml to add:
-```
-  - pip:
-    - --no-deps ./libs/elf@b58e4c83
-```
-
-Overriding `python-elf` with the local copy at `libs/elf@b58e4c83/` 
-is necessary because claude always seems to pull an old version 
-from conda-forge.
-
-2. Then:
+Verify installation:
 
 ```bash
-micromamba create -f environment.yml -y
-micromamba activate blockwise-mc
+blimp -h
 ```
+
+**Important:** Files in `libs/` are external dependencies and must never be modified.
 
 
 ## Tests
