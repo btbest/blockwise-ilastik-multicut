@@ -117,7 +117,14 @@ def extract_vigra_rf_from_ilp(ilp_path: str) -> VigraRfSklearnWrapper:
 
     try:
         with _open_ilp_file(ilp_path) as h5:
-            src = h5["Training and Multicut/Output"]
+            try:
+                src = h5["Training and Multicut/Output"]
+            except KeyError:
+                raise KeyError(
+                    f"No trained classifier found in '{ilp_path}' "
+                    "(expected HDF5 group 'Training and Multicut/Output'). "
+                    "Are you sure you actually trained a classifier in this project?"
+                ) from None
 
             # Copy forest data to temp file
             with h5py.File(cache_path, "w") as cache:
