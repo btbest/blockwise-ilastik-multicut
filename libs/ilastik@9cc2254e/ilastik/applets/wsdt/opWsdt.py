@@ -188,6 +188,23 @@ class OpWsdt(Operator):
 
         pmap = self._opSelectedInput.Output(roi.start, roi.stop).wait()
 
+        # DEBUG: Export the probability map that feeds into watershed
+        # Set ILASTIK_EXPORT_WSDT_PMAP=/path/to/export/ to enable
+        import os
+        export_dir = os.environ.get("ILASTIK_EXPORT_WSDT_PMAP")
+        if export_dir:
+            try:
+                import zarr
+                from pathlib import Path
+                roi_str = "_".join(f"{s}_{e}" for s, e in zip(roi.start, roi.stop))
+                zarr_path = str(Path(export_dir) / f"ilastik_pmap_{roi_str}.zarr")
+                z = zarr.open(zarr_path, mode="w", shape=pmap.shape, dtype=pmap.dtype,
+                              chunks=(128, 128, 128, 1) if pmap.ndim == 4 else (128, 128, 128))
+                z[:] = pmap
+                logger.info(f"Exported WSDT pmap to {zarr_path}")
+            except Exception as e:
+                logger.warning(f"Failed to export WSDT pmap: {e}")
+
         if self.debug_results:
             self.debug_results.clear()
 
