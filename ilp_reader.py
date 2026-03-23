@@ -231,37 +231,34 @@ def read_wsdt_params(ilp_path: str) -> dict:
         "pixel_pitch": None,  # None → isotropic (no anisotropy correction)
         "blockwise": True,    # False only for very old projects (pre-v0.2 serialiser)
     }
-    try:
-        with _open_ilp_file(ilp_path) as f:
-            if WSDT_GROUP not in f:
-                return dict(defaults)
-            g = f[WSDT_GROUP]
-            result = {}
-            result["threshold"] = float(g["Threshold"][()]) if "Threshold" in g else defaults["threshold"]
-            result["min_size"]  = int(g["MinSize"][()])     if "MinSize"   in g else defaults["min_size"]
-            result["sigma"]     = float(g["Sigma"][()])     if "Sigma"     in g else defaults["sigma"]
-            result["alpha"]     = float(g["Alpha"][()])     if "Alpha"     in g else defaults["alpha"]
+    with _open_ilp_file(ilp_path) as f:
+        if WSDT_GROUP not in f:
+            return dict(defaults)
+        g = f[WSDT_GROUP]
+        result = {}
+        result["threshold"] = float(g["Threshold"][()]) if "Threshold" in g else defaults["threshold"]
+        result["min_size"]  = int(g["MinSize"][()])     if "MinSize"   in g else defaults["min_size"]
+        result["sigma"]     = float(g["Sigma"][()])     if "Sigma"     in g else defaults["sigma"]
+        result["alpha"]     = float(g["Alpha"][()])     if "Alpha"     in g else defaults["alpha"]
 
-            # PixelPitch is stored as a list; [] means isotropic → pass None to elf.
-            if "PixelPitch" in g:
-                raw = g["PixelPitch"][()]
-                if hasattr(raw, "tolist"):
-                    raw = raw.tolist()
-                result["pixel_pitch"] = raw if raw else None
-            else:
-                result["pixel_pitch"] = defaults["pixel_pitch"]
+        # PixelPitch is stored as a list; [] means isotropic → pass None to elf.
+        if "PixelPitch" in g:
+            raw = g["PixelPitch"][()]
+            if hasattr(raw, "tolist"):
+                raw = raw.tolist()
+            result["pixel_pitch"] = raw if raw else None
+        else:
+            result["pixel_pitch"] = defaults["pixel_pitch"]
 
-            # BlockwiseWatershed is absent in v0.1 projects; SerialDefaultSlot
-            # sets it to False in that case, meaning ilastik ran the watershed
-            # on the full crop (not blockwise).
-            if "BlockwiseWatershed" in g:
-                result["blockwise"] = bool(g["BlockwiseWatershed"][()])
-            else:
-                result["blockwise"] = False  # old project, no key → ilastik default was False
+        # BlockwiseWatershed is absent in v0.1 projects; SerialDefaultSlot
+        # sets it to False in that case, meaning ilastik ran the watershed
+        # on the full crop (not blockwise).
+        if "BlockwiseWatershed" in g:
+            result["blockwise"] = bool(g["BlockwiseWatershed"][()])
+        else:
+            result["blockwise"] = False  # old project, no key → ilastik default was False
 
-            return result
-    except Exception:
-        return dict(defaults)
+        return result
 
 
 def read_edge_labels(ilp_path: str, lane: int = 0) -> dict:
