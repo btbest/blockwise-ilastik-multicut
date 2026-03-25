@@ -263,14 +263,18 @@ class _Float32LazyArray:
         # correctly.  Determine the scale factor once at init time.
         src_dtype = np.dtype(arr.dtype)
         if np.issubdtype(src_dtype, np.integer):
-            self._scale = np.float32(1.0 / np.iinfo(src_dtype).max)
+            self._scale = float(np.iinfo(src_dtype).max)
         else:
             self._scale = None
 
     def __getitem__(self, key):
-        data = np.asarray(self._arr[key], dtype=np.float32)
+        data = self._arr[key].astype(np.float32)
         if self._scale is not None:
-            data *= self._scale
+            # This needs to EXACTLY copy the normalization in
+            # EdgeTrainingWithMulticutWorkflow.connectLane.normalize_inplace !
+            # The float imprecision difference between `data *= 1/255` vs `data /= 255`
+            # is enough to propagate into Gaussians and local maxima to cause watershed differences.
+            data[:] = data[:] / self._scale
         if self._squeeze_channel and data.ndim == 4:
             data = data[..., 0]
         return data
@@ -570,7 +574,7 @@ def _ilastik_parallel_watershed(
         local_bb   = tuple(slice(s, e) for s, e in zip(block.innerBlockLocal.begin, block.innerBlockLocal.end))
         inner_bb   = tuple(slice(s, e) for s, e in zip(block.innerBlock.begin,      block.innerBlock.end))
 
-        data_block = np.asarray(boundary_lazy[outer_bb], dtype=np.float32)
+        data_block = boundary_lazy[outer_bb]
 
         # Guard against empty / flat blocks to avoid NaN in elf's dt / dt.max().
         if not (data_block > ws_threshold).any():
