@@ -6,6 +6,32 @@ intermediate results to find where the first floating-point divergence
 appears.  This pinpoints whether the issue is in the input probabilities,
 the distance transform, the Gaussian smoothing, or the seed detection.
 
+This script is written to work on probabilities extracted mid-run
+from ilastik and blimp respectively using something like:
+
+```
+# in multicut_from_ilp._ilastik_parallel_watershed:
+export_dir = "C:/Users/root/EM/plasmamem/probs-debug"
+import zarr
+from pathlib import Path
+zarr_path = str(Path(export_dir) / "blimp_pmap.zarr")
+z = zarr.open(zarr_path, mode="w", shape=boundary_lazy.shape, dtype=boundary_lazy.dtype,
+              chunks=(128, 128, 128, 1) if boundary_lazy.ndim == 4 else (128, 128, 128))
+z[:] = boundary_lazy
+```
+
+```
+# in ilastik OpWsdt.execute:
+export_dir = "C:/Users/root/EM/plasmamem/probs-debug"
+import zarr
+from pathlib import Path
+roi_str = "_".join(f"{s}_{e}" for s, e in zip(roi.start, roi.stop))
+zarr_path = str(Path(export_dir) / f"ilastik_pmap_{roi_str}.zarr")
+z = zarr.open(zarr_path, mode="w", shape=pmap.shape, dtype=pmap.dtype,
+              chunks=(128, 128, 128, 1) if pmap.ndim == 4 else (128, 128, 128))
+z[:] = pmap
+```
+
 Usage
 -----
     python scripts/diagnose_watershed_diff.py \
