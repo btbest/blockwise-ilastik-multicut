@@ -242,8 +242,11 @@ class _Float32LazyArray:
     cast before being handed to elf / vigra.
 
     Integer-typed arrays (e.g. uint8 with values in 0–255) are automatically
-    rescaled to [0, 1] so that downstream thresholds (typically 0.5) remain
-    meaningful.
+    rescaled to [0, 1] using DIVISION (data / max, not data * (1/max)) to match
+    ilastik's OpConvertDtype.execute behavior. The difference in floating-point
+    precision between division and multiplication by reciprocal can accumulate
+    through distance transforms and Gaussian smoothing, causing watershed results
+    to diverge from ilastik's.
 
     A trailing size-1 channel dimension (e.g. shape (Z, Y, X, 1)) is
     automatically stripped so the rest of the pipeline always sees a 3-D
@@ -260,17 +263,21 @@ class _Float32LazyArray:
 
         # If the source dtype is an integer type (e.g. uint8 0–255), we need
         # to rescale to [0, 1] so that thresholds and blending weights work
-        # correctly.  Determine the scale factor once at init time.
-        src_dtype = np.dtype(arr.dtype)
-        if np.issubdtype(src_dtype, np.integer):
-            self._scale = np.float32(1.0 / np.iinfo(src_dtype).max)
+        # correctly.  Use division (data / max) to match ilastik's normalization
+        # and avoid floating-point precision drift across distance transforms.
+        self._src_dtype = np.dtype(arr.dtype)
+        self._is_integer = np.issubdtype(self._src_dtype, np.integer)
+        if self._is_integer:
+            self._max_val = np.float32(np.iinfo(self._src_dtype).max)
         else:
-            self._scale = None
+            self._max_val = None
 
     def __getitem__(self, key):
         data = np.asarray(self._arr[key], dtype=np.float32)
-        if self._scale is not None:
-            data *= self._scale
+        if self._is_integer and self._max_val is not None:
+            # Use division (data / max) not multiplication (data * (1/max))
+            # to match ilastik's normalization and avoid precision drift.
+            data = data / self._max_val
         if self._squeeze_channel and data.ndim == 4:
             data = data[..., 0]
         return data
