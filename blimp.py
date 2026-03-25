@@ -67,9 +67,11 @@ def _run_one_lane(
     _run_lazy,
 ):
     """Run the full multicut pipeline on a single raw+probabilities pair."""
+    from _cli_helpers import data_stem
+
     prefix = f"[lane {lane_index + 1}/{n_lanes}] " if n_lanes > 1 else ""
 
-    raw_stem = Path(raw_path).stem
+    raw_stem = data_stem(raw_path)
 
     seg_zarr = str(out / f"{raw_stem}_segmentation.zarr")
     default_ws = str(out / f"{raw_stem}_watershed.zarr")

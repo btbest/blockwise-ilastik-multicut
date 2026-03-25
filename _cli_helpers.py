@@ -4,6 +4,34 @@ Functions here resolve watershed parameters from a combination of CLI flags
 and (optionally) an ilastik .ilp project file.
 """
 
+from pathlib import Path
+
+_H5_EXTENSIONS = (".h5", ".hdf5", ".hdf", ".ilp")
+
+
+def data_stem(path: str) -> str:
+    """Return a human-friendly stem for naming output files.
+
+    For compound HDF5 paths like ``/data/block1_raw.h5/exported_data``
+    returns ``"block1_raw"`` (the file stem, not the internal dataset).
+    For plain paths like ``raw.zarr`` returns ``"raw"``.
+
+    Uses ``PureWindowsPath`` so that Windows backslash separators are
+    handled correctly even when running on Linux.
+    """
+    from pathlib import PureWindowsPath
+
+    lower = path.lower()
+    for ext in _H5_EXTENSIONS:
+        idx = lower.find(ext)
+        if idx == -1:
+            continue
+        end = idx + len(ext)
+        if end < len(path) and path[end] not in ("/", "\\"):
+            continue
+        return PureWindowsPath(path[:end]).stem
+    return PureWindowsPath(path).stem
+
 import warnings
 
 # Default values used when neither CLI flags nor .ilp provide a value.
