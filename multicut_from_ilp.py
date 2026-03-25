@@ -107,6 +107,39 @@ def _parse_channel_spec(spec: str):
     return channel_name, file_path, None
 
 
+_H5_EXTENSIONS = (".h5", ".hdf5", ".hdf", ".ilp")
+
+
+def _split_h5_path(path: str):
+    """Split a compound HDF5 path into (file_path, internal_key).
+
+    ilastik stores paths like ``/data/file.h5/exported_data`` where the
+    portion after the ``.h5`` is the internal dataset path.  This helper
+    finds the first HDF5-like extension in *path* and splits there.
+
+    Returns
+    -------
+    (file_path, internal_key) if *path* contains an HDF5 extension,
+    or (None, None) otherwise.  *internal_key* is ``None`` when no
+    internal portion is present (e.g. plain ``file.h5``).
+    """
+    lower = path.lower()
+    for ext in _H5_EXTENSIONS:
+        idx = lower.find(ext)
+        if idx == -1:
+            continue
+        end = idx + len(ext)
+        # Make sure the extension is followed by nothing, a separator, or EOF
+        if end < len(path) and path[end] not in ("/", "\\"):
+            continue
+        file_part = path[:end]
+        rest = path[end:]
+        # Strip leading separator from the internal key
+        internal = rest.lstrip("/\\") or None
+        return file_part, internal
+    return None, None
+
+
 def _open_channel_lazy(path: str, key: str | None):
     """
     Return a lazy array-like object for the channel data.
@@ -121,10 +154,13 @@ def _open_channel_lazy(path: str, key: str | None):
 
     The caller is responsible for keeping file handles open (see _ChannelStore).
     """
-    if path.endswith(".h5") or path.endswith(".hdf5"):
-        fh = h5py.File(path, "r")
-        if key is not None:
-            return fh[key], fh
+    h5_file, h5_internal = _split_h5_path(path)
+    if h5_file is not None:
+        fh = h5py.File(h5_file, "r")
+        # Explicit internal dataset path (from ilastik-style compound path)
+        effective_key = key or h5_internal
+        if effective_key is not None:
+            return fh[effective_key], fh
         # Auto-detect the single dataset in the file.
         datasets = []
         fh.visititems(
@@ -132,11 +168,11 @@ def _open_channel_lazy(path: str, key: str | None):
         )
         if len(datasets) == 0:
             fh.close()
-            raise ValueError(f"No datasets found in HDF5 file: {path!r}")
+            raise ValueError(f"No datasets found in HDF5 file: {h5_file!r}")
         if len(datasets) > 1:
             fh.close()
             raise ValueError(
-                f"HDF5 file {path!r} contains multiple datasets {datasets}. "
+                f"HDF5 file {h5_file!r} contains multiple datasets {datasets}. "
                 "The file must contain exactly one dataset."
             )
         return fh[datasets[0]], fh  # (dataset, handle_to_close)
