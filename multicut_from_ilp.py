@@ -13,6 +13,40 @@ from operator import mul
 from ilp_reader import read_feature_names
 
 
+def _extract_lazy_array_to_zarr(lazy_arr, zarr_path: str) -> None:
+    """Extract a lazy array (e.g. _Float32LazyArray) to zarr reliably.
+
+    Zarr's __setitem__ doesn't correctly handle custom array-like objects that
+    only implement __getitem__. This function explicitly reads the data using
+    __getitem__ and writes it to zarr in chunks, ensuring the data is not
+    corrupted.
+
+    Args:
+        lazy_arr: Object with shape, dtype, and __getitem__ (e.g. _Float32LazyArray)
+        zarr_path: Path to write the zarr store to
+
+    Example:
+        >>> _extract_lazy_array_to_zarr(boundary_lazy, "debug/probs.zarr")
+    """
+    import zarr
+
+    z = zarr.open(
+        zarr_path,
+        mode="w",
+        shape=lazy_arr.shape,
+        dtype=lazy_arr.dtype,
+        chunks=tuple(min(64, s) for s in lazy_arr.shape)
+    )
+    # Read and write in chunks to avoid memory overload and ensure correct conversion
+    for i in range(0, lazy_arr.shape[0], 64):
+        i_end = min(i + 64, lazy_arr.shape[0])
+        for j in range(0, lazy_arr.shape[1], 64):
+            j_end = min(j + 64, lazy_arr.shape[1])
+            for k in range(0, lazy_arr.shape[2], 64):
+                k_end = min(k + 64, lazy_arr.shape[2])
+                z[i:i_end, j:j_end, k:k_end] = lazy_arr[i:i_end, j:j_end, k:k_end]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
