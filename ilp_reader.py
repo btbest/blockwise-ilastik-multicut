@@ -136,6 +136,89 @@ def _dataframe_from_hdf5(h5_group):
 # ---------------------------------------------------------------------------
 
 
+def read_input_data_paths(ilp_path: str):
+    """
+    Read file paths for Raw Data and Probabilities from the ILP's Input Data group.
+
+    Returns
+    -------
+    list[dict]
+        One dict per lane with keys ``"raw"`` and ``"probabilities"``.
+        Each value is an absolute path string (relative paths are resolved
+        against the directory containing the .ilp file).
+        Lanes where either role is missing or uses a non-filesystem class
+        (e.g. ``ProjectInternalDatasetInfo``) are silently skipped.
+
+    Raises
+    ------
+    KeyError
+        If the ``Input Data`` group is absent from the .ilp file.
+
+    Example
+    -------
+    >>> read_input_data_paths("my_project.ilp")
+    [
+        {"raw": "/data/crop1_raw.h5", "probabilities": "/data/crop1_probs.h5"},
+        {"raw": "/data/crop2_raw.h5", "probabilities": "/data/crop2_probs.h5"},
+    ]
+    """
+    from pathlib import Path
+
+    ilp_dir = Path(ilp_path).resolve().parent
+
+    pairs = []
+    with _open_ilp_file(ilp_path) as f:
+        if "Input Data" not in f:
+            raise KeyError(
+                f"No 'Input Data' group found in {ilp_path}. "
+                "The project may have been created with an older ilastik version."
+            )
+        input_data = f["Input Data"]
+        if "infos" not in input_data:
+            raise KeyError(f"No 'Input Data/infos' group found in {ilp_path}.")
+
+        infos = input_data["infos"]
+        for lane_key in sorted(infos.keys()):
+            lane_group = infos[lane_key]
+
+            raw_path = _read_lane_role_path(lane_group, "Raw Data", ilp_dir)
+            prob_path = _read_lane_role_path(lane_group, "Probabilities", ilp_dir)
+
+            if raw_path is None or prob_path is None:
+                continue
+
+            pairs.append({"raw": raw_path, "probabilities": prob_path})
+
+    return pairs
+
+
+def _read_lane_role_path(lane_group, role_name, ilp_dir):
+    """Extract a file path for a single role from a lane group, or None."""
+    from pathlib import Path
+
+    if role_name not in lane_group:
+        return None
+
+    role = lane_group[role_name]
+
+    # Only filesystem-based dataset types have usable file paths
+    cls = _decode(role["__class__"][()]) if "__class__" in role else ""
+    if cls not in ("FilesystemDatasetInfo", "RelativeFilesystemDatasetInfo"):
+        return None
+
+    if "filePath" not in role:
+        return None
+
+    raw_path = _decode(role["filePath"][()])
+    if not raw_path:
+        return None
+
+    p = Path(raw_path)
+    if not p.is_absolute():
+        p = ilp_dir / p
+    return str(p)
+
+
 def discover_lanes(ilp_path: str) -> list:
     """
     Return sorted list of lane indices that have edge labels saved in the .ilp.

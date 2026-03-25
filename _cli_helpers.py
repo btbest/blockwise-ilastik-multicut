@@ -86,6 +86,70 @@ def resolve_watershed_params(args, *, ilp_path=None):
     }
 
 
+def resolve_lane_pairs(args, *, ilp_path):
+    """Resolve the list of (raw, probabilities) pairs to process.
+
+    When ``--raw`` and ``--probabilities`` are given on the command line, a
+    single pair is returned.  Otherwise, all Raw Data / Probabilities lane
+    pairs are read from the .ilp project's Input Data group.
+
+    Also resolves ``--output-dir``: when not supplied, defaults to a
+    ``blimp-output/`` directory next to the .ilp file.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments (may have ``raw``, ``probabilities``,
+        ``output_dir`` set to ``None``).
+    ilp_path : str
+        Path to the .ilp project file.
+
+    Returns
+    -------
+    pairs : list[dict]
+        Each dict has keys ``"raw"`` and ``"probabilities"`` with
+        absolute path strings.
+    output_dir : pathlib.Path
+        Resolved output directory.
+    """
+    import sys
+    from pathlib import Path
+
+    # --- Output directory ---
+    if args.output_dir is not None:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path(ilp_path).resolve().parent / "blimp-output"
+
+    # --- Lane pairs ---
+    has_raw = args.raw is not None
+    has_prob = args.probabilities is not None
+
+    if has_raw != has_prob:
+        print(
+            "error: --raw and --probabilities must both be given or both omitted.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if has_raw:
+        return [{"raw": args.raw, "probabilities": args.probabilities}], output_dir
+
+    # Read from the .ilp Input Data group
+    from ilp_reader import read_input_data_paths
+
+    pairs = read_input_data_paths(ilp_path)
+    if not pairs:
+        print(
+            "error: no Raw Data + Probabilities lane pairs found in the .ilp "
+            "Input Data group.  Provide --raw and --probabilities explicitly.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    return pairs, output_dir
+
+
 def validate_watershed_params(args):
     """Validate that watershed-only mode has enough parameters.
 
@@ -97,6 +161,21 @@ def validate_watershed_params(args):
     """
     if getattr(args, "ilp", None):
         return  # .ilp provides defaults; nothing to validate
+
+    # Without --ilp, --raw and --probabilities are required too
+    missing_data = []
+    if args.raw is None:
+        missing_data.append("--raw")
+    if args.probabilities is None:
+        missing_data.append("--probabilities")
+    if missing_data:
+        import sys
+        print(
+            f"error: without --ilp, the following parameters must be "
+            f"given explicitly: {', '.join(missing_data)}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     cli_params = {
         "--ws-threshold": args.ws_threshold,
