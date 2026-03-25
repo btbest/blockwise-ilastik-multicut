@@ -195,7 +195,13 @@ def main():
     lazy_b = _Float32LazyArray(arr_b)
     shape = tuple(lazy_b.shape)
     print(f"Volume shape: {shape}")
-    print(f"Source dtype: {arr_b.dtype}")
+    print(f"BLIMP source dtype: {arr_b.dtype}  ndim={arr_b.ndim}  shape={arr_b.shape}")
+    if hasattr(arr_b, 'chunks'):
+        print(f"BLIMP zarr chunks: {arr_b.chunks}")
+    if np.issubdtype(np.dtype(arr_b.dtype), np.integer):
+        print(f"  → _Float32LazyArray will rescale by 1/{np.iinfo(np.dtype(arr_b.dtype)).max}")
+    else:
+        print(f"  → _Float32LazyArray will NOT rescale (already float)")
 
     ndim = len(shape)
     BLOCK_SHAPE = (128,) * ndim
@@ -228,6 +234,27 @@ def main():
     else:
         # Load ilastik probabilities
         arr_i, fh_i = _open_channel_lazy(args.ilastik_probs, None)
+        print(f"ILASTIK source dtype: {arr_i.dtype}  ndim={arr_i.ndim}  shape={arr_i.shape}")
+        if hasattr(arr_i, 'chunks'):
+            print(f"ILASTIK zarr chunks: {arr_i.chunks}")
+        if np.issubdtype(np.dtype(arr_i.dtype), np.integer):
+            print(f"  → _Float32LazyArray will rescale by 1/{np.iinfo(np.dtype(arr_i.dtype)).max}")
+        else:
+            print(f"  → _Float32LazyArray will NOT rescale (already float)")
+
+        # Also compare raw (pre-conversion) values at a few locations
+        _raw_b = np.asarray(arr_b[0:1, 0:1, 0:10])
+        _raw_i = np.asarray(arr_i[0:1, 0:1, 0:10])
+        print(f"\n  Raw source values [0,0,0:10]:")
+        print(f"    blimp  ({arr_b.dtype}): {_raw_b.ravel()}")
+        print(f"    ilastik({arr_i.dtype}): {_raw_i.ravel()}")
+        if not np.array_equal(_raw_b, _raw_i):
+            print(f"    → RAW SOURCE DATA DIFFERS (before any float conversion)")
+            print(f"    → This means the zarr files contain different data.")
+            print(f"       Check: channel selection, extraction point, or file identity.")
+        else:
+            print(f"    → Raw source data matches — divergence is in float conversion.")
+
         lazy_i = _Float32LazyArray(arr_i)
         shape_i = tuple(lazy_i.shape)
         if shape_i != shape:
@@ -259,6 +286,17 @@ def main():
             if first_diff == "input":
                 print("      The probability data itself differs — check dtype, "
                       "export precision, and compression.")
+                print()
+                print("      KNOWN ISSUE: ilastik's MulticutWorkflow connects OpWsdt.Input")
+                print("      directly to raw data selection (no OpConvertDtype), so if the")
+                print("      source file is uint8, ilastik's watershed sees values 0–255")
+                print("      while blimp's _Float32LazyArray rescales to [0, 1].")
+                print("      This causes threshold 0.5 to catch ALL nonzero voxels in")
+                print("      ilastik (uint8 >= 1 > 0.5) vs only values > 0.5 in blimp.")
+                print()
+                print("      Also check: are both reading the SAME channel from the")
+                print("      probabilities file?  blimp selects by name (_find_boundary_channel),")
+                print("      ilastik selects by numeric index (ChannelSelections, default [0]).")
             elif first_diff == "thresholded":
                 print("      Values near the threshold boundary differ — "
                       "likely float precision in the input.")
