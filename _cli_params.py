@@ -11,16 +11,19 @@ import argparse
 # ---------------------------------------------------------------------------
 WATERSHED_PARAMS = [
     ("--raw", dict(
-        required=True, metavar="PATH",
-        help="Raw data volume (zarr or h5 with a single dataset), zyx axis order",
+        default=None, metavar="PATH",
+        help="Raw data volume (zarr or h5 with a single dataset), zyx axis order.  "
+             "When omitted, all Raw Data lanes are read from the .ilp project file.",
     )),
     ("--probabilities", dict(
-        required=True, metavar="PATH",
-        help="Boundary probability volume (zarr or h5 with a single dataset), zyx axis order",
+        default=None, metavar="PATH",
+        help="Boundary probability volume (zarr or h5 with a single dataset), zyx axis order.  "
+             "When omitted, all Probabilities lanes are read from the .ilp project file.",
     )),
     ("--output-dir", dict(
-        required=True, metavar="DIR",
-        help="Directory for all outputs (created if it does not exist)",
+        default=None, metavar="DIR",
+        help="Directory for all outputs (created if it does not exist).  "
+             "Defaults to a 'blimp-output' directory next to the .ilp file.",
     )),
     ("--ws-method", dict(
         choices=["ilastik", "two-pass", "2d"],

@@ -15,6 +15,10 @@ Or pass ws-zarr to point to a precomputed watershed zarr.
 
 Usage
 -----
+    # Minimal: run on all lanes from the .ilp project
+    blimp --ilp my_project.ilp
+
+    # Explicit data paths (single lane):
     blimp \\
         --ilp my_project.ilp \\
         --raw raw.zarr \\
@@ -31,6 +35,10 @@ Both --raw and --probabilities accept local zarr stores and HDF5 files:
 
 Volumes must be in zyx(c) axis order.  Both inputs must have the same shape.
 Singleton channel axis is accepted (ignored).
+
+When --raw and --probabilities are omitted, all Raw Data + Probabilities
+lane pairs are read from the .ilp project file's Input Data group.
+Output defaults to a ``blimp-output/`` directory next to the .ilp file.
 """
 
 import argparse
@@ -39,6 +47,118 @@ import pickle
 import sys
 import warnings
 from pathlib import Path
+
+
+def _run_one_lane(
+    *,
+    ilp_path,
+    raw_path,
+    prob_path,
+    out,
+    rf,
+    args,
+    ws,
+    lane_index,
+    n_lanes,
+    read_feature_names,
+    _find_raw_channel,
+    _find_boundary_channel,
+    _build_channel_spec,
+    _run_lazy,
+):
+    """Run the full multicut pipeline on a single raw+probabilities pair."""
+    from _cli_helpers import data_stem
+
+    prefix = f"[lane {lane_index + 1}/{n_lanes}] " if n_lanes > 1 else ""
+
+    raw_stem = data_stem(raw_path)
+
+    seg_zarr = str(out / f"{raw_stem}_segmentation.zarr")
+    default_ws = str(out / f"{raw_stem}_watershed.zarr")
+
+    if args.ws_zarr:
+        ws_zarr_path = args.ws_zarr
+        keep_watershed = True
+    else:
+        ws_zarr_path = default_ws
+        keep_watershed = args.keep_watershed
+
+    # --- Save call parameters for reproducibility ---
+    params = {
+        "ilp":            ilp_path,
+        "raw":            raw_path,
+        "probabilities":  prob_path,
+        "output_dir":     str(out.resolve()),
+        "max_block_shape": args.max_block_shape,
+        "halo":           args.halo,
+        "beta":           args.beta,
+        "threads":        args.threads,
+        "classifier_source": args.classifier_source,
+        "n_estimators":   args.n_estimators,
+        "ws_method":      ws["ws_method"],
+        "ws_threshold":   ws["ws_threshold"],
+        "ws_sigma":       ws["ws_sigma"],
+        "ws_min_size":    ws["ws_min_size"],
+        "ws_alpha":       ws["ws_alpha"],
+        "ws_pixel_pitch": ws["ws_pixel_pitch"],
+        "ws_apply_nonmax": ws["ws_apply_nonmax"],
+        "ws_invert":      ws["ws_invert"],
+        "solver":         args.solver,
+        "ws_zarr":        ws_zarr_path,
+        "keep_watershed": keep_watershed,
+    }
+    params_file = out / f"{raw_stem}_params.json" if n_lanes > 1 else out / "params.json"
+    params_file.write_text(json.dumps(params, indent=2) + "\n")
+    print(f"{prefix}Parameters written to {params_file}")
+
+    # --- Map channels ---
+    print(f"\n{prefix}=== Mapping channels ===")
+    feature_names = read_feature_names(ilp_path)
+    raw_channel = _find_raw_channel(feature_names)
+    boundary_channel = _find_boundary_channel(feature_names)
+    print(f"  Raw channel      : {raw_channel!r}  →  {raw_path}")
+    print(f"  Boundary channel : {boundary_channel!r}  →  {prob_path}")
+
+    channel_specs = [
+        _build_channel_spec(boundary_channel, prob_path),
+        _build_channel_spec(raw_channel, raw_path),
+    ]
+
+    # --- Run blockwise lazy multicut ---
+    print(f"\n{prefix}=== Running blockwise multicut ===")
+    print(f"  Watershed method   : {ws['ws_method']}")
+    print(f"  Watershed parameters (from .ilp unless overridden):")
+    print(f"    threshold   : {ws['ws_threshold']}")
+    print(f"    sigma       : {ws['ws_sigma']}")
+    print(f"    min_size    : {ws['ws_min_size']}")
+    print(f"    alpha       : {ws['ws_alpha']}")
+    print(f"    pixel_pitch : {ws['ws_pixel_pitch']}")
+    print(f"    invert      : {ws['ws_invert']}")
+    _run_lazy(
+        ilp_path=ilp_path,
+        rf=rf,
+        channel_specs=channel_specs,
+        output_zarr_path=seg_zarr,
+        output_zarr_key="seg",
+        beta=args.beta,
+        block_shape=tuple(args.max_block_shape),
+        halo=list(args.halo),
+        internal_solver=args.solver,
+        n_threads=args.threads,
+        ws_method=ws["ws_method"],
+        ws_threshold=ws["ws_threshold"],
+        ws_sigma=ws["ws_sigma"],
+        ws_min_size=ws["ws_min_size"],
+        ws_alpha=ws["ws_alpha"],
+        ws_pixel_pitch=ws["ws_pixel_pitch"],
+        ws_apply_nonmax=ws["ws_apply_nonmax"],
+        ws_invert=ws["ws_invert"],
+        ws_zarr_path=ws_zarr_path,
+        keep_watershed=keep_watershed,
+    )
+
+    print(f"\n{prefix}Segmentation : {seg_zarr}")
+    print(f"{prefix}Params       : {params_file}")
 
 
 def main():
@@ -88,10 +208,23 @@ def main():
     args = parser.parse_args()
 
     # Lazy imports: only load heavy modules after argument parsing succeeds
-    from _cli_helpers import resolve_watershed_params
+    from _cli_helpers import resolve_lane_pairs, resolve_watershed_params
     from fit_classifier import extract_vigra_rf_from_ilp, fit_rf_from_ilp
     from ilp_reader import read_feature_names
     from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_channel_spec, _run_lazy
+
+    # -----------------------------------------------------------------------
+    # Resolve lane pairs and output directory
+    # -----------------------------------------------------------------------
+    pairs, out = resolve_lane_pairs(args, ilp_path=args.ilp)
+    out.mkdir(parents=True, exist_ok=True)
+
+    n_lanes = len(pairs)
+    if n_lanes > 1:
+        print(f"Found {n_lanes} lane pairs in the .ilp project file:")
+        for i, p in enumerate(pairs):
+            print(f"  Lane {i + 1}: raw={p['raw']}")
+            print(f"           prob={p['probabilities']}")
 
     # -----------------------------------------------------------------------
     # Resolve watershed parameters (CLI flags override .ilp values)
@@ -99,60 +232,9 @@ def main():
     ws = resolve_watershed_params(args, ilp_path=args.ilp)
 
     # -----------------------------------------------------------------------
-    # Setup output directory and output paths
+    # Step 1: Load or fit the edge classifier (once for all lanes)
     # -----------------------------------------------------------------------
-    out = Path(args.output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    raw_stem = Path(args.raw).stem          # e.g. "my_raw" from "my_raw.zarr"
-
-    seg_zarr     = str(out / f"{raw_stem}_segmentation.zarr")
-    rf_pkl       = str(out / "rf.pkl")
-    default_ws   = str(out / f"{raw_stem}_watershed.zarr")
-
-    # If the user supplied --ws-zarr, use it as-is and never delete it.
-    # Otherwise use the default path and honour --keep-watershed.
-    if args.ws_zarr:
-        ws_zarr_path    = args.ws_zarr
-        keep_watershed  = True   # never delete a user-supplied watershed
-    else:
-        ws_zarr_path    = default_ws
-        keep_watershed  = args.keep_watershed
-
-    # -----------------------------------------------------------------------
-    # Save call parameters for reproducibility
-    # -----------------------------------------------------------------------
-    params = {
-        "ilp":            args.ilp,
-        "raw":            args.raw,
-        "probabilities":  args.probabilities,
-        "output_dir":     str(out.resolve()),
-        "max_block_shape": args.max_block_shape,
-        "halo":           args.halo,
-        "beta":           args.beta,
-        "threads":        args.threads,
-        "classifier_source": args.classifier_source,
-        "n_estimators":   args.n_estimators,
-        "ws_method":      ws["ws_method"],
-        "ws_threshold":   ws["ws_threshold"],
-        "ws_sigma":       ws["ws_sigma"],
-        "ws_min_size":    ws["ws_min_size"],
-        "ws_alpha":       ws["ws_alpha"],
-        "ws_pixel_pitch": ws["ws_pixel_pitch"],
-        "ws_apply_nonmax": ws["ws_apply_nonmax"],
-        "ws_invert":      ws["ws_invert"],
-        "solver":         args.solver,
-        "ws_zarr":        ws_zarr_path,
-        "keep_watershed": keep_watershed,
-    }
-    params_file = out / "params.json"
-    params_file.write_text(json.dumps(params, indent=2) + "\n")
-    print(f"Parameters written to {params_file}")
-
-    # -----------------------------------------------------------------------
-    # Step 1: Load or fit the edge classifier
-    # -----------------------------------------------------------------------
-    print("\n=== Step 1/3: Loading classifier ===")
+    print("\n=== Step 1: Loading classifier ===")
     if args.classifier_source == "ilp":
         rf = extract_vigra_rf_from_ilp(args.ilp)
     else:
@@ -161,67 +243,33 @@ def main():
             n_estimators=args.n_estimators,
             n_jobs=args.threads,
         )
-        # Only pickle the sklearn classifier; vigra one is already in the .ilp
+        rf_pkl = str(out / "rf.pkl")
         with open(rf_pkl, "wb") as fh:
             pickle.dump(rf, fh)
         print(f"Classifier saved to {rf_pkl}")
 
     # -----------------------------------------------------------------------
-    # Step 2: Map --raw / --probabilities to the ILP channel names
+    # Step 2+3: For each lane pair, map channels and run multicut
     # -----------------------------------------------------------------------
-    print("\n=== Step 2/3: Mapping channels ===")
-    feature_names = read_feature_names(args.ilp)
-    raw_channel      = _find_raw_channel(feature_names)
-    boundary_channel = _find_boundary_channel(feature_names)
-    print(f"  Raw channel      : {raw_channel!r}  →  {args.raw}")
-    print(f"  Boundary channel : {boundary_channel!r}  →  {args.probabilities}")
-
-    # Boundary channel must appear first in channel_specs so _run_lazy finds it
-    # via _find_boundary_channel (order in the specs list does not matter for
-    # feature computation, but placing it first is conventional).
-    channel_specs = [
-        _build_channel_spec(boundary_channel, args.probabilities),
-        _build_channel_spec(raw_channel,      args.raw),
-    ]
-
-    # -----------------------------------------------------------------------
-    # Step 3: Run blockwise lazy multicut
-    # -----------------------------------------------------------------------
-    print("\n=== Step 3/3: Running blockwise multicut ===")
-    print(f"  Watershed method   : {ws['ws_method']}")
-    print(f"  Watershed parameters (from .ilp unless overridden):")
-    print(f"    threshold   : {ws['ws_threshold']}")
-    print(f"    sigma       : {ws['ws_sigma']}")
-    print(f"    min_size    : {ws['ws_min_size']}")
-    print(f"    alpha       : {ws['ws_alpha']}")
-    print(f"    pixel_pitch : {ws['ws_pixel_pitch']}")
-    print(f"    invert      : {ws['ws_invert']}")
-    _run_lazy(
-        ilp_path=args.ilp,
-        rf=rf,
-        channel_specs=channel_specs,
-        output_zarr_path=seg_zarr,
-        output_zarr_key="seg",
-        beta=args.beta,
-        block_shape=tuple(args.max_block_shape),
-        halo=list(args.halo),
-        internal_solver=args.solver,
-        n_threads=args.threads,
-        ws_method=ws["ws_method"],
-        ws_threshold=ws["ws_threshold"],
-        ws_sigma=ws["ws_sigma"],
-        ws_min_size=ws["ws_min_size"],
-        ws_alpha=ws["ws_alpha"],
-        ws_pixel_pitch=ws["ws_pixel_pitch"],
-        ws_apply_nonmax=ws["ws_apply_nonmax"],
-        ws_invert=ws["ws_invert"],
-        ws_zarr_path=ws_zarr_path,
-        keep_watershed=keep_watershed,
-    )
+    for i, pair in enumerate(pairs):
+        _run_one_lane(
+            ilp_path=args.ilp,
+            raw_path=pair["raw"],
+            prob_path=pair["probabilities"],
+            out=out,
+            rf=rf,
+            args=args,
+            ws=ws,
+            lane_index=i,
+            n_lanes=n_lanes,
+            read_feature_names=read_feature_names,
+            _find_raw_channel=_find_raw_channel,
+            _find_boundary_channel=_find_boundary_channel,
+            _build_channel_spec=_build_channel_spec,
+            _run_lazy=_run_lazy,
+        )
 
     print("\n=== Done ===")
-    print(f"Segmentation : {seg_zarr}")
-    print(f"Params       : {params_file}")
     return 0
 
 
