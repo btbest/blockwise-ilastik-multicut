@@ -250,7 +250,7 @@ class _Float32LazyArray:
     spatial array.
     """
 
-    def __init__(self, arr):
+    def __init__(self, arr, normalize=True):
         self._arr = arr
         # Strip a trailing size-1 channel axis if present.
         self._squeeze_channel = (arr.ndim == 4 and arr.shape[-1] == 1)
@@ -262,7 +262,7 @@ class _Float32LazyArray:
         # to rescale to [0, 1] so that thresholds and blending weights work
         # correctly.  Determine the scale factor once at init time.
         src_dtype = np.dtype(arr.dtype)
-        if np.issubdtype(src_dtype, np.integer):
+        if normalize and np.issubdtype(src_dtype, np.integer):
             self._scale = float(np.iinfo(src_dtype).max)
         else:
             self._scale = None
@@ -954,7 +954,7 @@ def compute_ilastikrag_features(
                 f"Channel {channel_name!r} is required by the classifier but "
                 f"was not provided. Available: {list(channel_data)}"
             )
-        data = vigra.taggedView(np.asarray(channel_data[channel_name], dtype=np.float32), axes)
+        data = vigra.taggedView(channel_data[channel_name], axes)
         df = rag.compute_features(data, feat_names)
         feat_cols = [c for c in df.columns if c not in ("sp1", "sp2")]
         df = df[feat_cols].rename(
@@ -963,7 +963,8 @@ def compute_ilastikrag_features(
         feature_dfs.append(df)
 
     edge_ids = rag.edge_ids.astype(np.uint64)  # (N_edges, 2)
-    features = pd.concat(feature_dfs, axis=1).values.astype(np.float32)
+    features = pd.concat(feature_dfs, axis=1).values
+    assert features.dtype == np.float32, f"Unexpected feature dtype: {features.dtype}"
     return features, edge_ids
 
 
@@ -1082,7 +1083,7 @@ def _run_lazy(
 
             ws_block = ws_zarr_arr[outer_bb]  # Superpixels are already 1-indexed.
             channel_block = {
-                name: _Float32LazyArray(lazy_arrays[name])[outer_bb]
+                name: _Float32LazyArray(lazy_arrays[name], normalize=(name!="Raw Data"))[outer_bb]
                 for name in feature_names
             }
 
