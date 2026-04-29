@@ -148,20 +148,14 @@ Volumes must be in **zyx(c) axis order** with the **same shape**. (ilastik-typic
 
 ```bash
 blimp --ilp project.ilp --raw raw.zarr --probabilities boundary.zarr --output-dir results/ \
-    --max-block-shape 256 256 256      # block size (default)
+    --max-block-shape 256 256 256       # block size (default)
     --halo 32 32 32                     # block overlap (default)
-    --beta 0.5                          # merge/split bias (0.5 = balanced)
     --threads 8                         # parallel threads (default)
     --n-estimators 100                  # RF trees (default)
 ```
 
 Note that `max_block_shape` determines block size for the blockwise *multicut* only.
 The watershed uses ilastik block size (128x128x128).
-
-What does beta do?
-- `beta < 0.5`: favors merging segments
-- `beta = 0.5`: balanced (default)
-- `beta > 0.5`: favors splitting segments
 
 ### All options
 
@@ -175,10 +169,11 @@ Required:
 Blockwise multicut:
   --max-block-shape Z Y X     Block size (default: 256 256 256)
   --halo Z Y X                Block overlap (default: 32 32 32)
-  --beta FLOAT                Merge/split bias (default: 0.5)
   --threads INT               Parallel threads (default: 8)
   --solver                    kernighan-lin | greedy-additive | greedy-fixation
                               (default: kernighan-lin)
+  --mc-beta FLOAT             Merge/split bias (default: from .ilp or 0.5)
+  --mc-threshold FLOAT        Edge cut threshold (default: from .ilp or 0.5)
 
 Classifier:
   --classifier-source         ilp | sklearn (default: ilp)
@@ -197,6 +192,10 @@ Reuse watershed:
   --no-keep-watershed         Discard watershed zarr (default: keep)
 ```
 
+What does beta do?
+- `mc-beta < 0.5`: favors merging segments
+- `mc-beta = 0.5`: balanced (default)
+- `mc-beta > 0.5`: favors splitting segments
 ---
 
 ## Pipeline Overview
@@ -216,7 +215,7 @@ Final Segmentation
 **Data Requirements:**
 - Raw volume and boundary probabilities must have the same shape
 - All data must be in zyx axis order (zyxc is accepted if single-channel)
-- Supported formats: HDF5 (.h5), OME-Zarr (.zarr - currently expects a dataset called "s0")
+- Supported formats: HDF5 (.h5), OME-Zarr (.zarr - expects a dataset called "s0")
 
 ---
 
