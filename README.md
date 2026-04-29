@@ -25,13 +25,33 @@ For detailed options and workflows, see below.
 
 ---
 
+## Installation
+
+```bash
+# Download
+git clone https://github.com/btbest/blockwise-ilastik-multicut.git
+cd blockwise-ilastik-multicut
+
+# Create conda environment (installs dependencies)
+conda env create -n blimp -f environment.yml
+conda activate blimp
+
+# Install blimp
+pip install -e .
+```
+
+The `blimp` command will now be available.
+Try `blimp -h` to verify (this should print the help text).
+
+---
+
 ## What you need
 
 Before running blimp, gather three things:
 
+1. **Raw data volume**
+1. **Boundary probability predictions**
 1. **A trained `.ilp` project file** — created in ilastik's "Boundary-Based Segmentation with Multicut" workflow
-2. **Boundary probability predictions** — HDF5 or zarr file with the same shape as your raw data (zyx axis order)
-3. **Raw data volume** — HDF5 or zarr (zyx axis order)
 
 How to get these:
 
@@ -47,7 +67,9 @@ You need to pre-convert your dataset to HDF5 or Zarr, e.g.:
 
 ### Boundary probabilities
 
-1. Extract a small number (5-15) of subvolumes from your raw data; 256 x 256 x 256 voxels each.
+This involves three steps, with more detail on each step below:
+
+1. Extract a small number (5-15) of subvolumes from your raw data. The individual subvolumes should be small enough for your computer to handle comfortably, for example 256 x 256 x 256 voxels each.
 2. Train a classifier for segmenting membranes (boundaries) in these subvolumes, or find a pre-trained model that does a good job.
 3. Once you have found or trained a decent classifier that works on your subvolumes, run the same classifier on the full dataset.
 
@@ -69,6 +91,37 @@ Our (obviously biased) recommendation: Use ilastik and train on your subvolumes.
 
 In each workflow, train a classifier that distinguishes "membrane" from "everything else". Configure the export to export a *single channel* - the membrane channel (use the subregion settings in the export settings dialog).
 
+<details>
+<summary>Autocontext workflow tips (click to expand)</summary>
+
+You can get creative with trying out different combinations of target classes in the first and second classification rounds in Autocontext.
+
+* **Round 1**: "Boundary" vs "Everything else", **round 2**: "Boundary" vs "Nucleus" vs "Mitochondria" vs "Vesicle"...
+* **Round 1**: Multiple classes, **round 2**: "Boundary" vs "Everything else"
+* Subcategories of different kinds of boundary?
+* "Boundary" vs "Everything else" in both rounds
+
+In practice, we usually tend towards "Round 1: Many classes. Round 2: Two classes".
+</details>
+
+<details>
+<summary>Extract a single channel from exported Probabilities (advanced) (click to expand)</summary>
+
+If you forgot to restrict the subregion inside ilastik, you can use one of the blimp utility scripts to extract the relevant channel in post.
+Depending on how you installed blimp, you might have to go searching for the script file :)
+
+```
+cd blockwise-ilastik-multicut
+python scripts/channel_extract.py gt_block_Probabilities.h5 2
+```
+
+The script expects two parameters (plus one optional):
+* The h5 probabilities export file from ilastik
+* The index of the boundary channel you want to extract. Remember channels are counted starting at 0! The second channel has index "1". The example above extracts the third channel.
+* `--dataset exported_data` (Optional): Not necessary unless you were manually writing multiple outputs to the same h5 file under different dataset names.
+
+</details>
+
 #### 3. Generate probabilities for the whole dataset
 
 Use batch processing in the respective ilastik workflow that you trained on your subvolumes.
@@ -87,27 +140,7 @@ Use the "Boundary-Based Segmentation with Multicut" workflow:
   Remember:
   * Left mouse button: Mark as bad boundary ("**L**ose it")
   * Right mouse button: Mark as good boundary ("**R**emain")
-* There is no need to actually export segmentations. Just save the project file and take it into blimp.
-
----
-
-## Installation
-
-```bash
-# Download
-git clone https://github.com/btbest/blockwise-ilastik-multicut.git
-cd blockwise-ilastik-multicut
-
-# Create conda environment (installs dependencies)
-conda env create -n blimp -f environment.yml
-conda activate blimp
-
-# Install blimp
-pip install -e .
-```
-
-The `blimp` command will now be available.
-Try `blimp -h` to verify (this should print the help text).
+* There is no need to actually export segmentations. Once the boundary classifier is trained, save the project file and take it into blimp.
 
 ---
 
@@ -123,7 +156,21 @@ blimp \
     --output-dir multicut_results/
 ```
 
-**Output files in `multicut_results/`:**
+### Pipeline Overview
+
+```
+Raw Data (HDF5/Zarr)
+      ↓
+      ├→ Watershed Segmentation (from boundary probabilities)
+      ↓
+Superpixels
+      ↓
+      ├→ Blockwise Multicut (using trained classifier)
+      ↓
+Final Segmentation
+```
+
+### Output files in `multicut_results/`
 
 | File | Contents |
 |------|----------|
@@ -133,14 +180,13 @@ blimp \
 
 ### Input formats
 
-Both `--raw` and `--probabilities` accept:
+Both raw data and probabilities must be HDF5 or OME-Zarr, with zyx(c) shape.
 
-- **zarr:** `/path/to/file.zarr`
-- **HDF5:** `/path/to/file.h5` (must contain exactly one dataset)
+The ilastik-typical trailing channel axis is ok/ignored; but the dataset must only have 1 channel.
 
-Windows paths like `C:\Users\...\file.h5` are fine.
+If HDF5, there must only be one dataset inside the HDF5 file.
 
-Volumes must be in **zyx(c) axis order** with the **same shape**. (ilastik-typical trailing singleton axis is ignored)
+If OME-Zarr, there must be a scale called "s0".
 
 ---
 
@@ -196,26 +242,6 @@ What does beta do?
 - `mc-beta < 0.5`: favors merging segments
 - `mc-beta = 0.5`: balanced (default)
 - `mc-beta > 0.5`: favors splitting segments
----
-
-## Pipeline Overview
-
-```
-Raw Data (HDF5/Zarr)
-      ↓
-      ├→ Watershed Segmentation (from boundary probabilities)
-      ↓
-Superpixels
-      ↓
-      ├→ Blockwise Multicut (using trained classifier)
-      ↓
-Final Segmentation
-```
-
-**Data Requirements:**
-- Raw volume and boundary probabilities must have the same shape
-- All data must be in zyx axis order (zyxc is accepted if single-channel)
-- Supported formats: HDF5 (.h5), OME-Zarr (.zarr - expects a dataset called "s0")
 
 ---
 
