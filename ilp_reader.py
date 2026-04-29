@@ -383,6 +383,34 @@ def read_wsdt_params(ilp_path: str) -> dict:
         return result
 
 
+def read_mc_params(ilp_path: str) -> dict:
+    """
+    Read ``Training and Multicut`` applet parameters from an ilastik project file.
+
+    Returns
+    -------
+    dict with keys:
+        beta       (float)            – multicut beta parameter (default 0.5)
+        threshold  (float)      – edge probability threshold; above=cut (default 0.5)
+
+    Old project files contain no threshold (pre-1.4.2 bug); these use 0.5.
+    """
+    defaults = {
+        "beta":      0.5,
+        "threshold": 0.5,
+    }
+    with _open_ilp_file(ilp_path) as f:
+        if APPLET_GROUP not in f:
+            return dict(defaults)
+        g = f[APPLET_GROUP]
+        result = {}
+        result["beta"]      = float(g["Beta"][()])     if "Beta"   in g else defaults["beta"]
+        result["threshold"] = float(
+            g["ProbabilityThreshold"][()]
+        ) if "ProbabilityThreshold" in g else defaults["threshold"]
+    return result
+
+
 def read_edge_labels(ilp_path: str, lane: int = 0) -> dict:
     """
     Return the manually annotated edge labels for one lane.

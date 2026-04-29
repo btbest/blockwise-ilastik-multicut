@@ -968,6 +968,44 @@ def compute_ilastikrag_features(
     return features, edge_ids
 
 
+def compute_edge_costs(edge_ids, edge_probabilities: np.ndarray, beta, threshold) -> np.ndarray:
+    """
+    Convert edge probabilities to energies for the multicut problem.
+
+    Copied from ilastik.applets.multicut.opMulticut.compute_edge_weights.
+
+    edge_ids:
+        The list of edges in the graph. shape=(N, 2)
+    edge_probabilities:
+        1-D, float (1.0 means edge is CUT, disconnecting the two SPs)
+    beta:
+        scalar (float)
+    threshold:
+        scalar (float), moves the 0 of the edge weights (default threshold = 0.5)
+
+    Special behavior:
+        If any node has ID 0, all of it's edges will be given an
+        artificially low energy, to prevent it from merging with its
+        neighbors, regardless of what the edge_probabilities say.
+    """
+
+    # P(Edge=CUT), clipped to avoid log(0).
+    p1 = np.clip(edge_probabilities, 0.001, 0.999)
+    # Rescale [0; t] to [0; 0.5], and [t; 1] to [0.5; 1].
+    p1 = np.where(p1 <= threshold, p1 / (2 * threshold), 0.5 + (p1 - threshold) / (2 * (1 - threshold)))
+    # log((p0 / p1) + log((1-beta) / beta)), where p0 = 1 - p1 is P(Edge=NOT CUT).
+    edge_weights = np.log(np.reciprocal(p1) - 1) + np.log(1 / beta - 1)
+
+    # See note special behavior, above
+    edges_touching_zero = edge_ids[:, 0] == 0
+    if edges_touching_zero.any():
+        #logger.warning("Volume contains label 0, which will be excluded from the segmentation.")
+        MINIMUM_ENERGY = -1000.0
+        edge_weights[edges_touching_zero] = MINIMUM_ENERGY
+
+    return edge_weights
+
+
 # ---------------------------------------------------------------------------
 # Lazy / blockwise pipeline (for large volumes)
 # ---------------------------------------------------------------------------
@@ -975,16 +1013,17 @@ def compute_ilastikrag_features(
 
 def _run_lazy(
     ilp_path, rf, channel_specs, output_zarr_path, output_zarr_key,
-    beta, block_shape, halo, internal_solver, n_threads,
+    block_shape, halo, internal_solver, n_threads,
     ws_method, ws_threshold, ws_sigma, ws_min_size, ws_alpha,
     ws_pixel_pitch, ws_apply_nonmax, ws_invert,
     ws_zarr_path,
+    mc_beta, mc_threshold,
     keep_watershed=True,
 ):
     import nifty
     import zarr
     import nifty.tools as nt
-    from elf.segmentation.multicut import blockwise_multicut, compute_edge_costs
+    from elf.segmentation.multicut import blockwise_multicut
 
     feature_names = read_feature_names(ilp_path)
 
@@ -1095,11 +1134,11 @@ def _run_lazy(
                 continue
 
             probs = rf.predict_proba(features)[:, split_col]
-            costs = compute_edge_costs(probs.astype(np.float32), beta=beta)
+            costs = compute_edge_costs(edge_ids, probs, beta=mc_beta, threshold=mc_threshold)
 
             # Canonicalize edge endpoints (sp1 ≤ sp2) and accumulate.
             all_edges_list.append(np.sort(edge_ids, axis=1))
-            all_costs_list.append(costs.astype(np.float32))
+            all_costs_list.append(costs)
 
         if not all_edges_list:
             raise RuntimeError("No superpixel edges found; all blocks appear to be empty.")

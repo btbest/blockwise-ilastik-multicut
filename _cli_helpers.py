@@ -42,6 +42,11 @@ _WS_DEFAULTS = {
     "alpha": 0.9,
 }
 
+_MC_DEFAULTS = {
+    "beta": 0.5,
+    "threshold": 0.5,
+}
+
 
 def resolve_watershed_params(args, *, ilp_path=None):
     """Resolve final watershed parameter values.
@@ -111,6 +116,30 @@ def resolve_watershed_params(args, *, ilp_path=None):
         "ws_pixel_pitch":  ws_pixel_pitch,
         "ws_apply_nonmax": ws_apply_nonmax,
         "ws_method":       ws_method,
+    }
+
+
+def resolve_mc_params(args, *, ilp_path=None):
+    """As resolve_watershed_params but for multicut parameters"""
+    if ilp_path is not None:
+        from ilp_reader import read_mc_params
+        ilp_mc = read_mc_params(ilp_path)
+    else:
+        ilp_mc = None
+
+    def _pick(cli_val, ilp_key, default_key):
+        if cli_val is not None:
+            return cli_val
+        if ilp_mc is not None:
+            return ilp_mc[ilp_key]
+        return _MC_DEFAULTS[default_key]
+
+    mc_beta      = _pick(args.mc_beta,      "beta",      "beta")
+    mc_threshold = _pick(args.mc_threshold, "threshold", "threshold")
+
+    return {
+        "mc_beta":      mc_beta,
+        "mc_threshold": mc_threshold,
     }
 
 

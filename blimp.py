@@ -58,6 +58,7 @@ def _run_one_lane(
     rf,
     args,
     ws,
+    mc,
     lane_index,
     n_lanes,
     read_feature_names,
@@ -91,7 +92,6 @@ def _run_one_lane(
         "output_dir":     str(out.resolve()),
         "max_block_shape": args.max_block_shape,
         "halo":           args.halo,
-        "beta":           args.beta,
         "threads":        args.threads,
         "classifier_source": args.classifier_source,
         "n_estimators":   args.n_estimators,
@@ -106,6 +106,8 @@ def _run_one_lane(
         "solver":         args.solver,
         "ws_zarr":        ws_zarr_path,
         "keep_watershed": keep_watershed,
+        "mc_beta":        mc["mc_beta"],
+        "mc_threshold":   mc["mc_threshold"],
     }
     params_file = out / f"{raw_stem}_params.json" if n_lanes > 1 else out / "params.json"
     params_file.write_text(json.dumps(params, indent=2) + "\n")
@@ -134,13 +136,15 @@ def _run_one_lane(
     print(f"    alpha       : {ws['ws_alpha']}")
     print(f"    pixel_pitch : {ws['ws_pixel_pitch']}")
     print(f"    invert      : {ws['ws_invert']}")
+    print(f"  Multicut parameters (from .ilp unless overridden):")
+    print(f"    beta        : {mc['mc_beta']}")
+    print(f"    threshold   : {mc['mc_threshold']}")
     _run_lazy(
         ilp_path=ilp_path,
         rf=rf,
         channel_specs=channel_specs,
         output_zarr_path=seg_zarr,
         output_zarr_key="seg",
-        beta=args.beta,
         block_shape=tuple(args.max_block_shape),
         halo=list(args.halo),
         internal_solver=args.solver,
@@ -155,6 +159,8 @@ def _run_one_lane(
         ws_invert=ws["ws_invert"],
         ws_zarr_path=ws_zarr_path,
         keep_watershed=keep_watershed,
+        mc_beta=mc["mc_beta"],
+        mc_threshold=mc["mc_threshold"],
     )
 
     print(f"\n{prefix}Segmentation : {seg_zarr}")
@@ -181,8 +187,12 @@ def main():
 
     # Multicut-specific parameters
     parser.add_argument(
-        "--beta", type=float, default=0.5,
+        "--mc-beta", type=float, default=0.5,
         help="Multicut edge-cost bias: <0.5 merges more, >0.5 splits more (default: 0.5)",
+    )
+    parser.add_argument(
+        "--mc-threshold", type=float, default=0.5,
+        help="Multicut edge probability threshold: Edges above threshold are cut (default: 0.5)",
     )
     parser.add_argument(
         "--classifier-source",
@@ -208,7 +218,7 @@ def main():
     args = parser.parse_args()
 
     # Lazy imports: only load heavy modules after argument parsing succeeds
-    from _cli_helpers import resolve_lane_pairs, resolve_watershed_params
+    from _cli_helpers import resolve_lane_pairs, resolve_watershed_params, resolve_mc_params
     from fit_classifier import extract_vigra_rf_from_ilp, fit_rf_from_ilp
     from ilp_reader import read_feature_names
     from multicut_from_ilp import _find_boundary_channel, _find_raw_channel, _build_channel_spec, _run_lazy
@@ -249,6 +259,11 @@ def main():
         print(f"Classifier saved to {rf_pkl}")
 
     # -----------------------------------------------------------------------
+    # Resolve multicut parameters (CLI flags override .ilp values)
+    # -----------------------------------------------------------------------
+    mc = resolve_mc_params(args, ilp_path=args.ilp)
+
+    # -----------------------------------------------------------------------
     # Step 2+3: For each lane pair, map channels and run multicut
     # -----------------------------------------------------------------------
     for i, pair in enumerate(pairs):
@@ -260,6 +275,7 @@ def main():
             rf=rf,
             args=args,
             ws=ws,
+            mc=mc,
             lane_index=i,
             n_lanes=n_lanes,
             read_feature_names=read_feature_names,
