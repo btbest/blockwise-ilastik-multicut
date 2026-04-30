@@ -239,9 +239,9 @@ Reuse watershed:
 ```
 
 What does beta do?
-- `mc-beta < 0.5`: favors merging segments
+- `mc-beta < 0.5`: favors keeping segments split
 - `mc-beta = 0.5`: balanced (default)
-- `mc-beta > 0.5`: favors splitting segments
+- `mc-beta > 0.5`: favors merging segments
 
 ---
 
