@@ -137,6 +137,14 @@ def parallel_watershed(
 
 
 class OpWsdt(Operator):
+    """Blockwise watershed operator with deterministic superpixel IDs.
+
+    Each canonical block in the volume gets a deterministic ID offset based on
+    its block index, so superpixel IDs are globally unique regardless of the
+    order or subset of blocks computed. This allows arbitrary ROIs to be
+    requested independently and still produce consistent IDs.
+    """
+
     # Can be multi-channel (but you'll have to choose which channels you want to use)
     Input = InputSlot()
 
@@ -158,6 +166,11 @@ class OpWsdt(Operator):
 
     Superpixels = OutputSlot()
 
+    # Upper bound on labels per canonical watershed block.
+    # Block N gets IDs in range [N * MAX_LABELS_PER_BLOCK + 1, (N+1) * MAX_LABELS_PER_BLOCK].
+    # With 128^3 blocks (~2M voxels), 2^21 is a safe upper bound.
+    MAX_LABELS_PER_BLOCK = 2**21
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.debug_results = None
@@ -167,6 +180,15 @@ class OpWsdt(Operator):
         self._opSelectedInput.ChannelSelections.connect(self.ChannelSelections)
         self._opSelectedInput.InvertPixelProbabilities.connect(self.InvertPixelProbabilities)
         self._opSelectedInput.Input.connect(self.Input)
+
+    def _get_canonical_block_config(self):
+        """Return (block_shape, halo) for canonical watershed blocking."""
+        spatial_shape = self.Input.meta.shape[:-1]  # drop channel
+        ndim = len(spatial_shape)
+        base_block = 512 if ndim == 2 else 128
+        block_shape = tuple(min(base_block, s) for s in spatial_shape)
+        halo = [10] * ndim
+        return block_shape, halo
 
     def setupOutputs(self):
         if not self._opSelectedInput.Output.ready():
@@ -179,14 +201,17 @@ class OpWsdt(Operator):
         self.Superpixels.meta.dtype = np.uint32
         self.Superpixels.meta.display_mode = "random-colortable"
 
+        # Set ideal_blockshape to match canonical watershed blocking so that
+        # downstream caches request aligned blocks.
+        block_shape, _ = self._get_canonical_block_config()
+        self.Superpixels.meta.ideal_blockshape = block_shape + (1,)
+
         self.debug_results = None
         if self.EnableDebugOutputs.value:
             self.debug_results = OrderedDict()
 
     def execute(self, slot, subindex, roi, result):
         assert slot is self.Superpixels, "Unknown or unconnected output slot: {}".format(slot)
-
-        pmap = self._opSelectedInput.Output(roi.start, roi.stop).wait()
 
         if self.debug_results:
             self.debug_results.clear()
@@ -197,25 +222,15 @@ class OpWsdt(Operator):
         else:
             pixel_pitch_to_pass = self.PixelPitch.value
 
-        max_workers = max(1, Request.global_thread_pool.num_workers)
+        spatial_shape = self.Input.meta.shape[:-1]
+        ndim = len(spatial_shape)
 
         if self.BlockwiseWatershed.value:
-            ws, max_id = parallel_watershed(
-                pmap[..., 0],
-                self.Threshold.value,
-                self.Sigma.value,
-                self.Sigma.value,
-                self.MinSize.value,
-                self.Alpha.value,
-                pixel_pitch_to_pass,
-                self.ApplyNonmaxSuppression.value,
-                block_shape=None,
-                halo=None,
-                max_workers=max_workers,
-            )
+            self._execute_blockwise_deterministic(roi, result, pixel_pitch_to_pass, spatial_shape, ndim)
         else:
             # "compatibility" mode with older projects, where watershed was not
-            # computed block-wise.
+            # computed block-wise. Requests the entire ROI and runs single watershed.
+            pmap = self._opSelectedInput.Output(roi.start, roi.stop).wait()
             ws, max_id = distance_transform_watershed(
                 pmap[..., 0],
                 self.Threshold.value,
@@ -226,12 +241,83 @@ class OpWsdt(Operator):
                 pixel_pitch_to_pass,
                 self.ApplyNonmaxSuppression.value,
             )
-
-        # elf started returning uint64 in 0.46. Casting here is not dangerous.
-        # Up to now vigra is still used to produce the watershed in elf internally.
-        result[..., 0] = ws.astype("uint32")
+            result[..., 0] = ws.astype("uint32")
 
         self.watershed_completed()
+
+    def _execute_blockwise_deterministic(self, roi, result, pixel_pitch, spatial_shape, ndim):
+        """Execute watershed with deterministic per-block ID offsets.
+
+        For each canonical block overlapping the requested ROI:
+        1. Request the block+halo from upstream
+        2. Run distance_transform_watershed
+        3. Re-label the inner region with vigra.analysis.labelMultiArray
+        4. Add a deterministic offset: block_index * MAX_LABELS_PER_BLOCK
+        5. Write the ROI-relevant portion into result
+        """
+        from lazyflow.roi import getIntersectingBlocks
+
+        block_shape, halo = self._get_canonical_block_config()
+        spatial_roi_start = np.array(roi.start[:-1])
+        spatial_roi_stop = np.array(roi.stop[:-1])
+
+        # Find which canonical blocks overlap the requested ROI
+        block_starts = getIntersectingBlocks(block_shape, (spatial_roi_start, spatial_roi_stop))
+
+        for block_start in block_starts:
+            block_start = np.array(block_start)
+            block_stop = np.minimum(block_start + np.array(block_shape), spatial_shape)
+
+            # Compute the linear block index for deterministic offset
+            blocks_per_dim = np.array([(s + b - 1) // b for s, b in zip(spatial_shape, block_shape)])
+            block_index_nd = block_start // np.array(block_shape)
+            block_index = int(np.ravel_multi_index(block_index_nd, blocks_per_dim))
+
+            # Compute the outer (with halo) region, clipped to volume bounds
+            outer_start = np.maximum(block_start - np.array(halo), 0)
+            outer_stop = np.minimum(block_stop + np.array(halo), spatial_shape)
+
+            # Request pmap for outer region (with channel dim)
+            outer_start_with_c = np.append(outer_start, roi.start[-1])
+            outer_stop_with_c = np.append(outer_stop, roi.stop[-1])
+            pmap = self._opSelectedInput.Output(outer_start_with_c, outer_stop_with_c).wait()
+
+            # Run watershed on outer region
+            ws_outer, _ = distance_transform_watershed(
+                pmap[..., 0],
+                self.Threshold.value,
+                self.Sigma.value,
+                self.Sigma.value,
+                self.MinSize.value,
+                self.Alpha.value,
+                pixel_pitch,
+                self.ApplyNonmaxSuppression.value,
+            )
+
+            # Re-label inner region for clean consecutive labels
+            ws_outer = ws_outer.astype("uint32")
+            inner_local_start = block_start - outer_start
+            inner_local_stop = block_stop - outer_start
+            inner_local_slicing = tuple(slice(s, e) for s, e in zip(inner_local_start, inner_local_stop))
+            ws_inner = vigra.analysis.labelMultiArray(ws_outer[inner_local_slicing])
+
+            # Add deterministic offset (block 0 starts at 1, block 1 at MAX+1, etc.)
+            ws_inner[ws_inner > 0] += np.uint32(block_index * self.MAX_LABELS_PER_BLOCK)
+
+            # Write into result: intersection of this block with the requested ROI
+            result_start = np.maximum(block_start, spatial_roi_start)
+            result_stop = np.minimum(block_stop, spatial_roi_stop)
+
+            # Slicing into result array (relative to ROI start)
+            result_slicing = tuple(slice(int(s - r), int(e - r))
+                                   for s, e, r in zip(result_start, result_stop, spatial_roi_start))
+            result_slicing += (slice(0, 1),)  # channel dim
+
+            # Slicing into ws_inner (relative to block start)
+            ws_slicing = tuple(slice(int(s - b), int(e - b))
+                               for s, e, b in zip(result_start, result_stop, block_start))
+
+            result[result_slicing] = ws_inner[ws_slicing][..., np.newaxis]
 
     def propagateDirty(self, slot, subindex, roi):
         if slot is not self.EnableDebugOutputs:
@@ -317,6 +403,13 @@ class OpCachedWsdt(Operator):
         self.ThresholdedInput.connect(self._opThreshold.Output)
 
     def setupOutputs(self):
+        # Set the cache block shape to match the watershed canonical blocking.
+        # This ensures cache requests are always aligned with watershed blocks.
+        if self._opWsdt.Superpixels.ready():
+            ideal = self._opWsdt.Superpixels.meta.ideal_blockshape
+            if ideal is not None:
+                self._opCache.BlockShape.setValue(ideal)
+
         threshold = self.Threshold.value
         if threshold != self._opThreshold._last_threshold:
             self._opThreshold._last_threshold = threshold

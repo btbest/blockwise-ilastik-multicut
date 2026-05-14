@@ -1,6 +1,7 @@
 from builtins import range
 
 from functools import partial
+import threading
 
 import numpy as np
 import pandas as pd
@@ -9,7 +10,7 @@ import vigra
 import ilastikrag
 
 from lazyflow.graph import Operator, InputSlot, OutputSlot
-from lazyflow.roi import roiToSlice
+from lazyflow.roi import roiToSlice, getIntersectingBlocks, getBlockBounds
 from lazyflow.operators import OpValueCache, OpBlockedArrayCache
 from lazyflow.classifiers import ParallelVigraRfLazyflowClassifierFactory
 
@@ -27,6 +28,7 @@ class OpEdgeTraining(Operator):
     FeatureNames = InputSlot()
     FreezeClassifier = InputSlot(value=True)
     TrainRandomForest = InputSlot(value=True)
+    LazyMode = InputSlot(value=False)
 
     # Lane-wise
     WatershedSelectedInput = InputSlot(level=1)
@@ -43,6 +45,8 @@ class OpEdgeTraining(Operator):
 
     def __init__(self, *args, **kwargs):
         super(OpEdgeTraining, self).__init__(*args, **kwargs)
+
+        # ---- Global path (original): full-volume RAG + features ----
 
         self.opCreateRag = OpMultiLaneWrapper(OpCreateRag, parent=self)
         self.opCreateRag.Superpixels.connect(self.Superpixels)
@@ -63,6 +67,24 @@ class OpEdgeTraining(Operator):
         self.opEdgeFeaturesCache = OpMultiLaneWrapper(OpValueCache, parent=self, broadcastingSlotNames=["fixAtCurrent"])
         self.opEdgeFeaturesCache.Input.connect(self.opComputeEdgeFeatures.EdgeFeaturesDataFrame)
         self.opEdgeFeaturesCache.name = "opEdgeFeaturesCache"
+
+        # ---- Lazy/incremental path: ROI-local features ----
+
+        self.opIncrementalEdgeFeatures = OpMultiLaneWrapper(
+            OpIncrementalEdgeFeatures,
+            parent=self,
+            broadcastingSlotNames=["FeatureNames", "TrainRandomForest"],
+        )
+        self.opIncrementalEdgeFeatures.Superpixels.connect(self.Superpixels)
+        self.opIncrementalEdgeFeatures.VoxelData.connect(self.VoxelData)
+        self.opIncrementalEdgeFeatures.WatershedSelectedInput.connect(self.WatershedSelectedInput)
+        self.opIncrementalEdgeFeatures.FeatureNames.connect(self.FeatureNames)
+        self.opIncrementalEdgeFeatures.TrainRandomForest.connect(self.TrainRandomForest)
+
+        # ---- Classifier training (shared by both paths) ----
+        # In lazy mode, the classifier reads from the incremental features;
+        # in global mode, from the global features cache.
+        # The selection is done in setupOutputs() by reconnecting slots.
 
         self.opTrainEdgeClassifier = OpTrainEdgeClassifier(parent=self)
         self.opTrainEdgeClassifier.EdgeLabelsDict.connect(self.EdgeLabelsDict)
@@ -117,6 +139,8 @@ class OpEdgeTraining(Operator):
         self.EdgeProbabilitiesDict.connect(self.opEdgeProbabilitiesDictCache.Output)
         self.NaiveSegmentation.connect(self.opNaiveSegmentationCache.Output)
 
+        self._last_lazy_mode = None
+
         # All input multi-slots should be kept in sync
         # Output multi-slots will auto-sync via the graph
         multiInputs = [s for s in list(self.inputs.values()) if s.level >= 1]
@@ -169,6 +193,31 @@ class OpEdgeTraining(Operator):
             assert sp_slot.meta.dtype == np.uint32
             assert sp_slot.meta.getAxisKeys()[-1] == "c"
             seg_cache_blockshape_slot.setValue(sp_slot.meta.shape)
+
+        lazy_mode = self.LazyMode.value
+        if lazy_mode != self._last_lazy_mode:
+            self._last_lazy_mode = lazy_mode
+            if lazy_mode:
+                # Lazy mode: use incremental features for training and prediction
+                self.opTrainEdgeClassifier.EdgeFeaturesDataFrame.connect(
+                    self.opIncrementalEdgeFeatures.EdgeFeaturesDataFrame
+                )
+                self.opPredictEdgeProbabilities.EdgeFeaturesDataFrame.connect(
+                    self.opIncrementalEdgeFeatures.EdgeFeaturesDataFrame
+                )
+                self.opEdgeProbabilitiesDict.EdgeFeaturesDataFrame.connect(
+                    self.opIncrementalEdgeFeatures.EdgeFeaturesDataFrame
+                )
+            else:
+                # Global mode: use full-volume features
+                self.opTrainEdgeClassifier.EdgeFeaturesDataFrame.connect(
+                    self.opEdgeFeaturesCache.Output
+                )
+                self.opPredictEdgeProbabilities.EdgeFeaturesDataFrame.connect(
+                    self.opEdgeFeaturesCache.Output
+                )
+                # In global mode, Rag is connected; EdgeFeaturesDataFrame not needed
+                self.opEdgeProbabilitiesDict.Rag.connect(self.opRagCache.Output)
 
     def execute(self, slot, subindex, roi, result):
         assert False, "Shouldn't get here, but requesting slot: {}".format(slot)
@@ -223,9 +272,20 @@ class OpEdgeTraining(Operator):
             c = cache.getLane(lane_index)
             c.resetValue()
 
+        # Also reset the incremental edge features cache
+        incremental_lane = self.opIncrementalEdgeFeatures.getLane(lane_index)
+        incremental_lane.resetCache()
+
 
 class OpCreateRag(Operator):
+    """Create a RAG from the superpixel volume.
+
+    In ROI-local mode (LazyMode=True), builds a local RAG from only the
+    requested superpixel sub-volume. This avoids loading the full volume.
+    """
+
     Superpixels = InputSlot()
+    LazyMode = InputSlot(value=False)
     Rag = OutputSlot()
 
     def setupOutputs(self):
@@ -332,6 +392,151 @@ class OpComputeEdgeFeatures(Operator):
 
     def propagateDirty(self, slot, subindex, roi):
         self.EdgeFeaturesDataFrame.setDirty()
+
+
+class OpIncrementalEdgeFeatures(Operator):
+    """Computes edge features incrementally for arbitrary ROIs.
+
+    Instead of computing features for the entire volume at once, this operator
+    processes one block at a time. When a block ROI is requested (via
+    ``computeForRoi``), it:
+      1. Loads superpixels and voxel data for that ROI
+      2. Builds a throwaway local RAG
+      3. Computes edge features for edges in that block
+      4. Caches features in a flat dict keyed by (sp1, sp2)
+
+    The accumulated features can be retrieved as a DataFrame via the
+    ``EdgeFeaturesDataFrame`` output slot (used by the classifier trainer).
+    """
+
+    Superpixels = InputSlot()
+    VoxelData = InputSlot()
+    WatershedSelectedInput = InputSlot()
+    FeatureNames = InputSlot()
+    TrainRandomForest = InputSlot(value=False)
+
+    EdgeFeaturesDataFrame = OutputSlot()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._edge_features = {}  # {(sp1, sp2): {feature_name: value, ...}}
+        self._lock = threading.Lock()
+
+    def setupOutputs(self):
+        assert self.VoxelData.meta.getAxisKeys()[-1] == "c"
+        self.EdgeFeaturesDataFrame.meta.shape = (1,)
+        self.EdgeFeaturesDataFrame.meta.dtype = object
+
+    def resetCache(self):
+        """Clear the accumulated edge features cache."""
+        with self._lock:
+            self._edge_features.clear()
+        self.EdgeFeaturesDataFrame.setDirty()
+
+    def computeForRoi(self, roi_start, roi_stop):
+        """Compute and cache edge features for the given spatial ROI.
+
+        Args:
+            roi_start: Start of the ROI (spatial dims only, no channel).
+            roi_stop: Stop of the ROI (spatial dims only, no channel).
+
+        Returns:
+            dict mapping (sp1, sp2) -> {feature_name: value} for edges in this ROI.
+        """
+        roi_start_spatial = np.array(roi_start)
+        roi_stop_spatial = np.array(roi_stop)
+
+        # Request superpixels for this ROI (with channel dim)
+        sp_start = np.append(roi_start_spatial, 0)
+        sp_stop = np.append(roi_stop_spatial, 1)
+        sp_block = self.Superpixels(sp_start, sp_stop).wait()
+        sp_block = vigra.taggedView(sp_block, self.Superpixels.meta.axistags)
+        sp_block = sp_block.dropChannelAxis()
+
+        # Build local RAG
+        local_rag = ilastikrag.Rag(sp_block)
+        if local_rag.num_edges == 0:
+            return {}
+
+        new_edge_features = {}
+
+        if self.TrainRandomForest.value:
+            channel_feature_names = self.FeatureNames.value
+
+            for c in range(self.VoxelData.meta.shape[-1]):
+                channel_name = self.VoxelData.meta.channel_names[c]
+                if channel_name not in channel_feature_names:
+                    continue
+
+                feature_names = [decodeToStringIfBytes(f) for f in channel_feature_names[channel_name]]
+                if not feature_names:
+                    continue
+
+                vd_start = np.append(roi_start_spatial, c)
+                vd_stop = np.append(roi_stop_spatial, c + 1)
+                voxel_data = self.VoxelData(vd_start, vd_stop).wait()
+                voxel_data = vigra.taggedView(voxel_data, self.VoxelData.meta.axistags)
+                voxel_data = voxel_data[..., 0]  # drop channel
+
+                edge_features_df = local_rag.compute_features(voxel_data, feature_names)
+
+                for _, row in edge_features_df.iterrows():
+                    edge_key = (int(row["sp1"]), int(row["sp2"]))
+                    if edge_key not in new_edge_features:
+                        new_edge_features[edge_key] = {}
+                    for col in edge_features_df.columns[2:]:
+                        feat_name = channel_name + " " + col
+                        new_edge_features[edge_key][feat_name] = row[col]
+        else:
+            BEST_FEATURE = "standard_edge_mean"
+            vd_start = np.append(roi_start_spatial, 0)
+            vd_stop = np.append(roi_stop_spatial, 1)
+            voxel_data = self.WatershedSelectedInput(vd_start, vd_stop).wait()
+            voxel_data = vigra.taggedView(voxel_data, self.VoxelData.meta.axistags)
+            voxel_data = voxel_data[..., 0]
+
+            edge_features_df = local_rag.compute_features(voxel_data, [BEST_FEATURE])
+            for _, row in edge_features_df.iterrows():
+                edge_key = (int(row["sp1"]), int(row["sp2"]))
+                new_edge_features[edge_key] = {BEST_FEATURE: row[BEST_FEATURE]}
+
+        # Merge into the global cache (only add new edges, don't overwrite)
+        with self._lock:
+            for edge_key, features in new_edge_features.items():
+                if edge_key not in self._edge_features:
+                    self._edge_features[edge_key] = features
+
+        return new_edge_features
+
+    def execute(self, slot, subindex, roi, result):
+        """Return the accumulated edge features as a DataFrame."""
+        with self._lock:
+            cached = dict(self._edge_features)
+
+        if not cached:
+            # Return empty DataFrame with correct structure
+            result[0] = pd.DataFrame(columns=["sp1", "sp2"])
+            return
+
+        rows = []
+        for (sp1, sp2), features in cached.items():
+            row = {"sp1": sp1, "sp2": sp2}
+            row.update(features)
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+        # Ensure sp1, sp2 are first columns
+        cols = ["sp1", "sp2"] + [c for c in df.columns if c not in ("sp1", "sp2")]
+        df = df[cols]
+        # Ensure float32 for feature columns (required by classifier)
+        for col in df.columns[2:]:
+            df[col] = df[col].astype(np.float32)
+
+        result[0] = df
+
+    def propagateDirty(self, slot, subindex, roi):
+        # When inputs change, reset the cache and mark output dirty
+        self.resetCache()
 
 
 class OpTrainEdgeClassifier(Operator):
@@ -451,11 +656,15 @@ class OpPredictEdgeProbabilities(Operator):
 class OpEdgeProbabilitiesDict(Operator):
     """
     A little utility operator to combine a RAG's edge_ids
-    with an array of edge probabilities into a dict of id_pair -> probability
+    with an array of edge probabilities into a dict of id_pair -> probability.
+
+    In lazy mode (when Rag is not connected or not ready), works directly
+    from the EdgeFeaturesDataFrame to build the dict.
     """
 
-    Rag = InputSlot()
+    Rag = InputSlot(optional=True)
     EdgeProbabilities = InputSlot()
+    EdgeFeaturesDataFrame = InputSlot(optional=True)
     EdgeProbabilitiesDict = OutputSlot()
 
     def setupOutputs(self):
@@ -464,14 +673,25 @@ class OpEdgeProbabilitiesDict(Operator):
 
     def execute(self, slot, subindex, roi, result):
         logger.info("Converting edge probabilities to dict...")
-        rag = self.Rag.value
         edge_probabilities = self.EdgeProbabilities.value
-        if edge_probabilities is None:
-            # Edge probabilities are 'None' if they haven't been loaded into the cache yet.
-            # Just return 0.0 for all probabilities
-            result[0] = {tuple(edge_id): 0.0 for edge_id in rag.edge_ids}
+
+        if self.Rag.ready():
+            # Global mode: use RAG edge_ids
+            rag = self.Rag.value
+            if edge_probabilities is None:
+                result[0] = {tuple(edge_id): 0.0 for edge_id in rag.edge_ids}
+            else:
+                result[0] = dict(zip(map(tuple, rag.edge_ids), edge_probabilities))
+        elif self.EdgeFeaturesDataFrame.ready():
+            # Lazy/incremental mode: use edge_ids from the features DataFrame
+            edge_features_df = self.EdgeFeaturesDataFrame.value
+            if edge_probabilities is None or len(edge_features_df) == 0:
+                result[0] = {}
+            else:
+                edge_ids = list(zip(edge_features_df["sp1"].astype(int), edge_features_df["sp2"].astype(int)))
+                result[0] = dict(zip(map(tuple, edge_ids), edge_probabilities))
         else:
-            result[0] = dict(zip(map(tuple, rag.edge_ids), edge_probabilities))
+            result[0] = {}
 
         logger.info("...done")
 
