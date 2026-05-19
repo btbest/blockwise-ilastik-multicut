@@ -309,6 +309,23 @@ class _InvertedLazyArray:
         return np.float32(1.0) - self._arr[key]
 
 
+class _TransposedLazyArray:
+    """Lazy wrapper that transposes the axes (e.g., CXYZ -> ZYXC)."""
+
+    def __init__(self, arr):
+        self._arr = arr
+        self.shape = tuple(arr.shape[::-1])
+        self.dtype = arr.dtype
+        self.ndim = arr.ndim
+
+    def __getitem__(self, key):
+        if not isinstance(key, tuple):
+            key = (key,)
+        if Ellipsis not in key and len(key) < self.ndim:
+            key = key + (slice(None),) * (self.ndim - len(key))
+        key = key[::-1]
+        return np.transpose(self._arr[key])
+
 def _bigintprod(nums) -> int:
     """Product of an iterable using pure-Python integers.
 
@@ -1030,6 +1047,12 @@ def _run_lazy(
     # --- Open all channels lazily ---
     with _ChannelStore(channel_specs) as store:
         lazy_arrays = store.arrays
+
+        # Invert axes if input order is CXYZ (1, X, Y, Z) instead of ZYXC (Z, Y, X, 1)
+        for name, data in list(lazy_arrays.items()):
+            if len(data.shape) == 4 and data.shape[0] == 1 and data.shape[-1] != 1:
+                lazy_arrays[name] = _TransposedLazyArray(data)
+
         boundary_channel = _find_boundary_channel(feature_names)
         if boundary_channel not in lazy_arrays:
             raise KeyError(
