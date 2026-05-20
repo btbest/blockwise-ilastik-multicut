@@ -5,11 +5,55 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "blimp"
 version = "0.1.0"
+description = "BLockwise ilastik Multicut Pipeline for large 3D volumes"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Benedikt T. Best", email = "benedikt.best@embl.de" },
+    { name = "blimp contributors" },
+]
 requires-python = ">=3.10"
+keywords = [
+    "bioimage-analysis",
+    "blockwise",
+    "ilastik",
+    "multicut",
+    "segmentation",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+# Conda-only runtime dependencies such as ilastikrag, vigra, nifty, and
+# python-elf are declared in conda-recipe/meta.yaml.
+dependencies = [
+    "aiohttp",
+    "fsspec",
+    "h5py",
+    "numpy>=1",
+    "pandas>=2",
+    "scikit-learn<=1.6.1",
+    "tqdm",
+    "zarr>=2,<3",
+]
 
 [project.scripts]
 blimp = "blimp:main"
 blimp-watershed = "blimp_watershed:main"
+
+[project.urls]
+Homepage = "https://github.com/btbest/blockwise-ilastik-multicut"
+Repository = "https://github.com/btbest/blockwise-ilastik-multicut"
+Issues = "https://github.com/btbest/blockwise-ilastik-multicut/issues"
 
 [tool.setuptools]
 # Treat each top-level .py file as an importable module (no package directory).

@@ -1,0 +1,70 @@
+{% set name = "blimp" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  # Local development source. For channel publication, replace this with an
+  # immutable release sdist URL plus sha256; see ILASTIK_FORGE.md.
+  path: ..
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  entry_points:
+    - blimp = blimp:main
+    - blimp-watershed = blimp_watershed:main
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools >=61
+    - wheel
+  run:
+    - python >=3.10
+    - aiohttp
+    - fsspec
+    - h5py
+    - ilastikrag >=0.1.4
+    - nifty
+    - numpy >=1
+    - pandas >=2
+    - python-elf
+    - scikit-learn <=1.6.1
+    - tqdm
+    - vigra >=1.12
+    - zarr >=2,<3
+
+test:
+  source_files:
+    - tests
+  imports:
+    - blimp
+    - blimp_watershed
+    - fit_classifier
+    - ilp_reader
+    - multicut_from_ilp
+  commands:
+    - blimp --help
+    - blimp-watershed --help
+    - pytest -q tests
+  requires:
+    - pytest
+
+about:
+  home: https://github.com/btbest/blockwise-ilastik-multicut
+  dev_url: https://github.com/btbest/blockwise-ilastik-multicut
+  license: GPL-3.0-only
+  license_file: LICENSE
+  summary: BLockwise ilastik Multicut Pipeline for large 3D volumes
+  description: |
+    blimp runs ilastik multicut projects blockwise so large volumes
+    can be processed without loading the full input datasets into memory.
+
+extra:
+  recipe-maintainers:
+    - btbest

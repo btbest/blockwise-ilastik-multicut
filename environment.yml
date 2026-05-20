@@ -22,6 +22,8 @@ dependencies:
   - numba
   - pytest
   - pip
+  - setuptools>=61
+  - wheel
   - python-elf
   - requests
   - nomkl
