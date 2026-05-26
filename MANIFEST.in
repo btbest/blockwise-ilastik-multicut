@@ -6,7 +6,6 @@ include *.py
 recursive-include scripts *.py
 recursive-include tests *.py *.ilp
 
-prune libs
 prune .github
 prune .idea
 prune __pycache__

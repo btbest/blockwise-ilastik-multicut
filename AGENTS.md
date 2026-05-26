@@ -1,7 +1,5 @@
 # Agent setup
 
-**Important:** Files in `libs/` are for reference only and must never be modified. They are snapshots corresponding to relevant/installed versions of the packages.
-
 ## micromamba (Linux x86_64)
 
 ```bash

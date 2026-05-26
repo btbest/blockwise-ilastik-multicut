@@ -1,1 +1,0 @@
-from .trainableDomainAdaptationApplet import TrainableDomainAdaptationApplet

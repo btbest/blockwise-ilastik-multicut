@@ -3,7 +3,7 @@ tests/test_real_ilp.py
 ======================
 Tests that exercise ilp_reader.py, fit_classifier.py, and the helper
 functions in multicut_from_ilp.py against the genuine ilastik project at
-libs/example_mc_project.ilp.
+tests/example_mc_project.ilp.
 
 Known facts about that project (verified by inspecting the HDF5 file):
   - 2 lanes (0 and 1)
@@ -29,7 +29,7 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-EXAMPLE_ILP = REPO_ROOT / "libs" / "example_mc_project.ilp"
+EXAMPLE_ILP = REPO_ROOT / "tests" / "example_mc_project.ilp"
 
 # Skip every test in this module when the file is absent (e.g. shallow CI
 # checkouts that don't pull large binaries).
