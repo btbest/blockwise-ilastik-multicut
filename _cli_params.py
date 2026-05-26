@@ -12,13 +12,31 @@ import argparse
 WATERSHED_PARAMS = [
     ("--raw", dict(
         default=None, metavar="PATH",
-        help="Raw data volume (zarr or h5 with a single dataset), zyx axis order.  "
+        help="Raw data volume (zarr or h5 with a single dataset).  "
              "When omitted, all Raw Data lanes are read from the .ilp project file.",
     )),
     ("--probabilities", dict(
         default=None, metavar="PATH",
-        help="Boundary probability volume (zarr or h5 with a single dataset), zyx axis order.  "
+        help="Boundary probability volume (zarr or h5 with a single dataset).  "
              "When omitted, all Probabilities lanes are read from the .ilp project file.",
+    )),
+    ("--axes", dict(
+        default=None, metavar="AXES",
+        help=(
+            "Hard override for input array axes, e.g. 'zyx', 'zyxc', or 'cxyz'.  "
+            "When omitted, vigra axistags from the array/dataset attrs are used "
+            "if present; otherwise 3-D inputs are treated as zyx and 4-D inputs "
+            "as zyxc for backwards compatibility."
+        ),
+    )),
+    (("--channel-index", "--channel_index"), dict(
+        dest="channel_index", type=int, default=None, metavar="N",
+        help=(
+            "Select channel N from the input channel axis.  Requires --axes or "
+            "vigra axistags metadata so the channel axis can be identified.  "
+            "Without this option, inputs with a channel axis must have exactly "
+            "one channel."
+        ),
     )),
     ("--output-dir", dict(
         default=None, metavar="DIR",
@@ -115,7 +133,10 @@ BLOCKWISE_PARAMS = [
 def add_watershed_args(parser: argparse.ArgumentParser) -> None:
     """Add all watershed-related arguments to *parser*."""
     for flag, kwargs in WATERSHED_PARAMS:
-        parser.add_argument(flag, **kwargs)
+        if isinstance(flag, (tuple, list)):
+            parser.add_argument(*flag, **kwargs)
+        else:
+            parser.add_argument(flag, **kwargs)
 
 
 def add_blockwise_args(parser: argparse.ArgumentParser) -> None:

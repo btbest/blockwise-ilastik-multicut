@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import os
@@ -140,6 +141,226 @@ def _split_h5_path(path: str):
     return None, None
 
 
+def _coerce_json_attr(value):
+    """Return an HDF5/zarr JSON-like attribute as text or a Python object."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, np.bytes_):
+        return value.decode("utf-8")
+    if isinstance(value, np.ndarray):
+        if value.shape == ():
+            return _coerce_json_attr(value.item())
+        if value.dtype.kind in ("S", "U"):
+            return "".join(_coerce_json_attr(v) for v in value)
+    return value
+
+
+def _axes_from_axistags_json(axistags):
+    """Extract an axis string like ``"zyxc"`` from vigra axistags JSON."""
+    axistags = _coerce_json_attr(axistags)
+
+    if isinstance(axistags, str):
+        try:
+            import vigra
+
+            tags = vigra.AxisTags.fromJSON(axistags)
+            return "".join(axis.key for axis in tags).lower()
+        except ImportError:
+            # Fall back to direct JSON parsing below for lightweight tests or
+            # installs that only need axis metadata handling.
+            pass
+        except Exception as exc:
+            raise ValueError(f"Could not parse vigra axistags: {exc}") from exc
+
+        try:
+            parsed = json.loads(axistags)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Could not parse vigra axistags JSON: {exc}") from exc
+    elif isinstance(axistags, dict):
+        parsed = axistags
+    else:
+        raise ValueError(
+            f"Unsupported axistags attribute type: {type(axistags).__name__}"
+        )
+
+    try:
+        return "".join(axis["key"] for axis in parsed["axes"]).lower()
+    except Exception as exc:
+        raise ValueError("Could not extract axis keys from axistags") from exc
+
+
+def _read_axistags_axes(arr):
+    """Return axes from ``arr.attrs['axistags']`` if present, else ``None``."""
+    attrs = getattr(arr, "attrs", None)
+    if attrs is None or "axistags" not in attrs:
+        return None
+    return _axes_from_axistags_json(attrs["axistags"])
+
+
+def _normalize_axes(axes: str, ndim: int, source: str) -> str:
+    axes = "".join(str(axes).strip().lower().replace(",", "").split())
+    if len(axes) != ndim:
+        raise ValueError(
+            f"{source}: axes {axes!r} has length {len(axes)}, "
+            f"but the array has {ndim} dimensions."
+        )
+    if len(set(axes)) != len(axes):
+        raise ValueError(f"{source}: axes {axes!r} contains duplicate entries.")
+    unknown = set(axes) - set("zyxc")
+    if unknown:
+        raise ValueError(
+            f"{source}: axes {axes!r} contains unsupported axes "
+            f"{sorted(unknown)!r}; expected z, y, x, and optional c."
+        )
+    if set(axes) not in (set("zyx"), set("zyxc")):
+        raise ValueError(
+            f"{source}: axes {axes!r} must contain exactly z, y, x, "
+            "and optionally c."
+        )
+    return axes
+
+
+def _default_axes_for_ndim(ndim: int, source: str) -> str:
+    if ndim == 3:
+        return "zyx"
+    if ndim == 4:
+        return "zyxc"
+    raise ValueError(
+        f"{source}: expected a 3-D or 4-D input array. Got {ndim} dimensions."
+    )
+
+
+def _expand_spatial_key(key):
+    """Normalize a numpy-style key to one entry per output z/y/x axis."""
+    if key is Ellipsis:
+        return (slice(None), slice(None), slice(None))
+    if not isinstance(key, tuple):
+        key = (key,)
+
+    if Ellipsis in key:
+        if key.count(Ellipsis) > 1:
+            raise IndexError("an index can only have a single ellipsis")
+        ellipsis_pos = key.index(Ellipsis)
+        n_missing = 3 - (len(key) - 1)
+        if n_missing < 0:
+            raise IndexError("too many indices for 3-D zyx array")
+        key = key[:ellipsis_pos] + (slice(None),) * n_missing + key[ellipsis_pos + 1:]
+
+    if len(key) > 3:
+        raise IndexError("too many indices for 3-D zyx array")
+    return key + (slice(None),) * (3 - len(key))
+
+
+def _is_int_index(index):
+    return isinstance(index, (int, np.integer))
+
+
+class _ZYXLazyArray:
+    """Lazy view that presents input arrays as 3-D zyx data.
+
+    The source array may be stored in any order of z/y/x plus optional c.  The
+    channel axis is selected while reading blocks so downstream code can keep
+    using ordinary zyx slice tuples.
+    """
+
+    def __init__(self, arr, axes=None, channel_index=None, source="array"):
+        self._arr = arr
+        self._source = source
+        self._source_shape = tuple(int(s) for s in arr.shape)
+        self._source_ndim = len(self._source_shape)
+
+        metadata_axes = None if axes is not None else _read_axistags_axes(arr)
+        if axes is not None:
+            resolved_axes = axes
+            self.axes_source = "--axes"
+        elif metadata_axes is not None:
+            resolved_axes = metadata_axes
+            self.axes_source = "axistags"
+        else:
+            if channel_index is not None:
+                raise ValueError(
+                    f"{source}: --channel-index requires axis metadata. "
+                    "Provide --axes or an input array with vigra axistags."
+                )
+            resolved_axes = _default_axes_for_ndim(self._source_ndim, source)
+            self.axes_source = "implicit"
+
+        self.source_axes = _normalize_axes(
+            resolved_axes, self._source_ndim, source
+        )
+
+        self._spatial_axis_to_source = {
+            axis: self.source_axes.index(axis) for axis in "zyx"
+        }
+        self.shape = tuple(
+            self._source_shape[self._spatial_axis_to_source[axis]]
+            for axis in "zyx"
+        )
+        self.ndim = 3
+        self.dtype = arr.dtype
+
+        self._channel_axis = (
+            self.source_axes.index("c") if "c" in self.source_axes else None
+        )
+        if self._channel_axis is None:
+            self._channel_index = None
+        else:
+            n_channels = self._source_shape[self._channel_axis]
+            if channel_index is None:
+                if n_channels != 1:
+                    raise ValueError(
+                        f"{source}: input has {n_channels} channels on axis "
+                        f"{self.source_axes!r}; pass --channel-index to select one."
+                    )
+                self._channel_index = 0
+            else:
+                if channel_index < 0 or channel_index >= n_channels:
+                    raise ValueError(
+                        f"{source}: channel index {channel_index} is out of "
+                        f"bounds for {n_channels} channels."
+                    )
+                self._channel_index = int(channel_index)
+
+    def __getitem__(self, key):
+        spatial_key = _expand_spatial_key(key)
+        source_key = []
+        source_result_axes = []
+
+        for axis in self.source_axes:
+            if axis == "c":
+                source_key.append(self._channel_index)
+                continue
+
+            out_axis = "zyx".index(axis)
+            index = spatial_key[out_axis]
+            source_key.append(index)
+            if not _is_int_index(index):
+                source_result_axes.append(axis)
+
+        data = self._arr[tuple(source_key)]
+
+        output_result_axes = [
+            axis for axis, index in zip("zyx", spatial_key)
+            if not _is_int_index(index)
+        ]
+        if len(output_result_axes) <= 1:
+            return data
+
+        transpose_order = tuple(
+            source_result_axes.index(axis) for axis in output_result_axes
+        )
+        if transpose_order == tuple(range(len(transpose_order))):
+            return data
+        return np.transpose(data, transpose_order)
+
+
+def _as_zyx_lazy_array(arr, axes=None, channel_index=None, source="array"):
+    """Return a lazy array-like view with 3-D zyx shape."""
+    return _ZYXLazyArray(
+        arr, axes=axes, channel_index=channel_index, source=source
+    )
+
+
 def _open_channel_lazy(path: str, key: str | None):
     """
     Return a lazy array-like object for the channel data.
@@ -212,8 +433,10 @@ def _load_channel(path: str, key: str | None) -> np.ndarray:
 class _ChannelStore:
     """Context manager that holds open lazy handles for all channels."""
 
-    def __init__(self, channel_specs: list):
+    def __init__(self, channel_specs: list, axes=None, channel_index=None):
         self._specs = channel_specs
+        self._axes = axes
+        self._channel_index = channel_index
         self._handles = []
         self.arrays = {}  # channel_name → lazy array
 
@@ -221,6 +444,10 @@ class _ChannelStore:
         for spec in self._specs:
             ch_name, fpath, fkey = _parse_channel_spec(spec)
             arr, fh = _open_channel_lazy(fpath, fkey)
+            arr = _as_zyx_lazy_array(
+                arr, axes=self._axes, channel_index=self._channel_index,
+                source=fpath,
+            )
             self.arrays[ch_name] = arr
             if fh is not None:
                 self._handles.append(fh)
@@ -1019,6 +1246,8 @@ def _run_lazy(
     ws_zarr_path,
     mc_beta, mc_threshold,
     keep_watershed=True,
+    axes=None,
+    channel_index=None,
 ):
     import nifty
     import zarr
@@ -1028,7 +1257,9 @@ def _run_lazy(
     feature_names = read_feature_names(ilp_path)
 
     # --- Open all channels lazily ---
-    with _ChannelStore(channel_specs) as store:
+    with _ChannelStore(
+        channel_specs, axes=axes, channel_index=channel_index
+    ) as store:
         lazy_arrays = store.arrays
         boundary_channel = _find_boundary_channel(feature_names)
         if boundary_channel not in lazy_arrays:
@@ -1038,12 +1269,25 @@ def _run_lazy(
             )
         boundary_lazy = _Float32LazyArray(lazy_arrays[boundary_channel])
         vol_shape = tuple(boundary_lazy.shape)
-        if not(len(vol_shape) == 3 or (len(vol_shape) == 4 and vol_shape[-1] == 1)):
+        if len(vol_shape) != 3:
             raise ValueError(
-                "Boundary probability volume must be 3D or contain exactly one channel (last axis). "
+                "Boundary probability volume must resolve to 3D zyx data. "
                 f"Got shape: {vol_shape!r}"
             )
         print(f"Boundary probabilities shape: {vol_shape}")
+
+        for name in feature_names:
+            if name not in lazy_arrays:
+                raise KeyError(
+                    f"Channel {name!r} is required by the classifier but was "
+                    f"not provided. Available: {list(lazy_arrays)}"
+                )
+            channel_shape = tuple(_Float32LazyArray(lazy_arrays[name]).shape)
+            if channel_shape != vol_shape:
+                raise ValueError(
+                    f"Channel {name!r} resolves to shape {channel_shape}, "
+                    f"but boundary probabilities resolve to {vol_shape}."
+                )
 
         # --- Diagnostic: sample a small central patch to verify probability ---
         # convention.  elf's distance_transform_watershed expects high values

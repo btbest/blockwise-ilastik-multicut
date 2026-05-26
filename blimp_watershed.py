@@ -39,8 +39,9 @@ Both --raw and --probabilities accept local zarr stores and HDF5 files:
     /path/to/file.zarr           local zarr store
     /path/to/file.h5             HDF5 file (must contain exactly one dataset)
 
-Volumes must be in zyx(c) axis order.  Both inputs must have the same shape.
-Singleton channel axis is accepted (ignored).
+Input axes are read from vigra axistags when present.  Use --axes to override
+or provide missing metadata, and --channel-index to select one channel from a
+multi-channel input.  Internally, data is presented as zyx.
 
 When --raw and --probabilities are omitted and --ilp is given, all
 Raw Data + Probabilities lane pairs are read from the .ilp project
@@ -72,6 +73,7 @@ def _run_one_watershed(
     _open_channel_lazy,
     _Float32LazyArray,
     _InvertedLazyArray,
+    _as_zyx_lazy_array,
     _open_or_compute_watershed_zarr,
 ):
     """Run watershed on a single raw+probabilities pair."""
@@ -93,6 +95,8 @@ def _run_one_watershed(
     params = {
         "raw":             raw_path,
         "probabilities":   prob_path,
+        "axes":            args.axes,
+        "channel_index":   args.channel_index,
         "output_dir":      str(out.resolve()),
         "ilp":             args.ilp,
         "max_block_shape": args.max_block_shape,
@@ -129,6 +133,12 @@ def _run_one_watershed(
 
     boundary_arr, boundary_fh = _open_channel_lazy(prob_path, None)
     try:
+        boundary_arr = _as_zyx_lazy_array(
+            boundary_arr,
+            axes=args.axes,
+            channel_index=args.channel_index,
+            source=prob_path,
+        )
         boundary_lazy = _Float32LazyArray(boundary_arr)
         vol_shape = tuple(boundary_lazy.shape)
         print(f"  Volume shape: {vol_shape}")
@@ -224,6 +234,7 @@ def main():
     from multicut_from_ilp import (
         _Float32LazyArray,
         _InvertedLazyArray,
+        _as_zyx_lazy_array,
         _open_channel_lazy,
         _open_or_compute_watershed_zarr,
     )
@@ -246,6 +257,7 @@ def main():
             _open_channel_lazy=_open_channel_lazy,
             _Float32LazyArray=_Float32LazyArray,
             _InvertedLazyArray=_InvertedLazyArray,
+            _as_zyx_lazy_array=_as_zyx_lazy_array,
             _open_or_compute_watershed_zarr=_open_or_compute_watershed_zarr,
         )
 

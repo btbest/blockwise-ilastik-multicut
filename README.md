@@ -180,9 +180,13 @@ Final Segmentation
 
 ### Input formats
 
-Both raw data and probabilities must be HDF5 or OME-Zarr, with zyx(c) shape.
+Both raw data and probabilities must be HDF5 or (OME-)Zarr arrays with z, y, x
+axes and optional c.  Axis order is read from vigra `axistags` metadata when
+present.  Use `--axes`, for example `--axes cxyz`, to override that metadata
+or to provide axes for arrays that do not have it.
 
-The ilastik-typical trailing channel axis is ok/ignored; but the dataset must only have 1 channel.
+If a channel axis is present, the dataset must contain exactly one channel
+unless `--channel-index N` selects one explicitly.
 
 If HDF5, there must only be one dataset inside the HDF5 file.
 
@@ -197,6 +201,8 @@ blimp --ilp project.ilp --raw raw.zarr --probabilities boundary.zarr --output-di
     --max-block-shape 256 256 256       # block size (default)
     --halo 32 32 32                     # block overlap (default)
     --threads 8                         # parallel threads (default)
+    --axes cxyz                         # override input axis order
+    --channel-index 0                   # select a channel from multi-channel input
     --n-estimators 100                  # RF trees (default)
 ```
 
