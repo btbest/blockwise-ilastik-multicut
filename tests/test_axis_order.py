@@ -20,13 +20,13 @@ class ArrayWithAttrs:
         return self._data[key]
 
 
-def test_axes_override_transposes_and_selects_channel():
+def test_input_axes_override_transposes_and_selects_channel():
     from multicut_from_ilp import _as_zyx_lazy_array
 
     data = np.arange(2 * 5 * 4 * 3).reshape(2, 5, 4, 3)
     lazy = _as_zyx_lazy_array(
         ArrayWithAttrs(data),
-        axes="cxyz",
+        input_axes="cxyz",
         channel_index=1,
         source="probs.zarr",
     )
@@ -52,7 +52,7 @@ def test_axistags_metadata_is_used_when_axes_override_is_absent():
     np.testing.assert_array_equal(lazy[:, :, :], expected)
 
 
-def test_axes_override_takes_precedence_over_axistags():
+def test_input_axes_override_takes_precedence_over_axistags():
     vigra = pytest.importorskip("vigra")
     from multicut_from_ilp import _as_zyx_lazy_array
 
@@ -61,7 +61,7 @@ def test_axes_override_takes_precedence_over_axistags():
 
     lazy = _as_zyx_lazy_array(
         ArrayWithAttrs(data, attrs=attrs),
-        axes="xzy",
+        input_axes="xzy",
         source="raw.h5",
     )
 
@@ -75,7 +75,9 @@ def test_multi_channel_input_requires_channel_index():
 
     data = np.zeros((2, 3, 4, 2), dtype=np.uint8)
     with pytest.raises(ValueError, match="pass --channel-index"):
-        _as_zyx_lazy_array(ArrayWithAttrs(data), axes="zyxc", source="probs.h5")
+        _as_zyx_lazy_array(
+            ArrayWithAttrs(data), input_axes="zyxc", source="probs.h5"
+        )
 
 
 def test_channel_index_requires_explicit_or_metadata_axes():
@@ -97,7 +99,7 @@ def test_channel_index_bounds_are_checked():
     with pytest.raises(ValueError, match="out of bounds"):
         _as_zyx_lazy_array(
             ArrayWithAttrs(data),
-            axes="zyxc",
+            input_axes="zyxc",
             channel_index=2,
             source="probs.h5",
         )

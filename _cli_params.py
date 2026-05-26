@@ -20,8 +20,8 @@ WATERSHED_PARAMS = [
         help="Boundary probability volume (zarr or h5 with a single dataset).  "
              "When omitted, all Probabilities lanes are read from the .ilp project file.",
     )),
-    ("--axes", dict(
-        default=None, metavar="AXES",
+    (("--input-axes", "--input_axes"), dict(
+        dest="input_axes", default=None, metavar="AXES",
         help=(
             "Hard override for input array axes, e.g. 'zyx', 'zyxc', or 'cxyz'.  "
             "When omitted, vigra axistags from the array/dataset attrs are used "
@@ -32,9 +32,9 @@ WATERSHED_PARAMS = [
     (("--channel-index", "--channel_index"), dict(
         dest="channel_index", type=int, default=None, metavar="N",
         help=(
-            "Select channel N from the input channel axis.  Requires --axes or "
-            "vigra axistags metadata so the channel axis can be identified.  "
-            "Without this option, inputs with a channel axis must have exactly "
+            "Select channel N from the input channel axis.  Requires "
+            "--input-axes or vigra axistags metadata so the channel axis can "
+            "be identified.  Without this option, inputs with a channel axis must have exactly "
             "one channel."
         ),
     )),

@@ -263,16 +263,16 @@ class _ZYXLazyArray:
     using ordinary zyx slice tuples.
     """
 
-    def __init__(self, arr, axes=None, channel_index=None, source="array"):
+    def __init__(self, arr, input_axes=None, channel_index=None, source="array"):
         self._arr = arr
         self._source = source
         self._source_shape = tuple(int(s) for s in arr.shape)
         self._source_ndim = len(self._source_shape)
 
-        metadata_axes = None if axes is not None else _read_axistags_axes(arr)
-        if axes is not None:
-            resolved_axes = axes
-            self.axes_source = "--axes"
+        metadata_axes = None if input_axes is not None else _read_axistags_axes(arr)
+        if input_axes is not None:
+            resolved_axes = input_axes
+            self.axes_source = "--input-axes"
         elif metadata_axes is not None:
             resolved_axes = metadata_axes
             self.axes_source = "axistags"
@@ -280,7 +280,7 @@ class _ZYXLazyArray:
             if channel_index is not None:
                 raise ValueError(
                     f"{source}: --channel-index requires axis metadata. "
-                    "Provide --axes or an input array with vigra axistags."
+                    "Provide --input-axes or an input array with vigra axistags."
                 )
             resolved_axes = _default_axes_for_ndim(self._source_ndim, source)
             self.axes_source = "implicit"
@@ -354,10 +354,10 @@ class _ZYXLazyArray:
         return np.transpose(data, transpose_order)
 
 
-def _as_zyx_lazy_array(arr, axes=None, channel_index=None, source="array"):
+def _as_zyx_lazy_array(arr, input_axes=None, channel_index=None, source="array"):
     """Return a lazy array-like view with 3-D zyx shape."""
     return _ZYXLazyArray(
-        arr, axes=axes, channel_index=channel_index, source=source
+        arr, input_axes=input_axes, channel_index=channel_index, source=source
     )
 
 
@@ -433,9 +433,9 @@ def _load_channel(path: str, key: str | None) -> np.ndarray:
 class _ChannelStore:
     """Context manager that holds open lazy handles for all channels."""
 
-    def __init__(self, channel_specs: list, axes=None, channel_index=None):
+    def __init__(self, channel_specs: list, input_axes=None, channel_index=None):
         self._specs = channel_specs
-        self._axes = axes
+        self._input_axes = input_axes
         self._channel_index = channel_index
         self._handles = []
         self.arrays = {}  # channel_name → lazy array
@@ -445,7 +445,7 @@ class _ChannelStore:
             ch_name, fpath, fkey = _parse_channel_spec(spec)
             arr, fh = _open_channel_lazy(fpath, fkey)
             arr = _as_zyx_lazy_array(
-                arr, axes=self._axes, channel_index=self._channel_index,
+                arr, input_axes=self._input_axes, channel_index=self._channel_index,
                 source=fpath,
             )
             self.arrays[ch_name] = arr
@@ -1246,7 +1246,7 @@ def _run_lazy(
     ws_zarr_path,
     mc_beta, mc_threshold,
     keep_watershed=True,
-    axes=None,
+    input_axes=None,
     channel_index=None,
 ):
     import nifty
@@ -1258,7 +1258,7 @@ def _run_lazy(
 
     # --- Open all channels lazily ---
     with _ChannelStore(
-        channel_specs, axes=axes, channel_index=channel_index
+        channel_specs, input_axes=input_axes, channel_index=channel_index
     ) as store:
         lazy_arrays = store.arrays
         boundary_channel = _find_boundary_channel(feature_names)

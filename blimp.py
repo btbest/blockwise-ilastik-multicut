@@ -33,10 +33,10 @@ Both --raw and --probabilities accept local zarr stores and HDF5 files:
     /path/to/file.h5             HDF5 file (must contain exactly one dataset)
     C:\\Users\\...\\file.h5      Windows absolute paths are also supported
 
-Input axes are read from vigra axistags when present.  Use --axes to override
-or provide missing metadata, and --channel-index to select one channel from a
-multi-channel input.  Internally, data is presented as zyx.  Both inputs must
-resolve to the same zyx shape.
+Input axes are read from vigra axistags when present.  Use --input-axes to
+override or provide missing metadata, and --channel-index to select one channel
+from a multi-channel input.  Internally, data is presented as zyx.  Both inputs
+must resolve to the same zyx shape.
 
 When --raw and --probabilities are omitted, all Raw Data + Probabilities
 lane pairs are read from the .ilp project file's Input Data group.
@@ -91,7 +91,7 @@ def _run_one_lane(
         "ilp":            ilp_path,
         "raw":            raw_path,
         "probabilities":  prob_path,
-        "axes":           args.axes,
+        "input_axes":     args.input_axes,
         "channel_index":  args.channel_index,
         "output_dir":     str(out.resolve()),
         "max_block_shape": args.max_block_shape,
@@ -165,7 +165,7 @@ def _run_one_lane(
         keep_watershed=keep_watershed,
         mc_beta=mc["mc_beta"],
         mc_threshold=mc["mc_threshold"],
-        axes=args.axes,
+        input_axes=args.input_axes,
         channel_index=args.channel_index,
     )
 
