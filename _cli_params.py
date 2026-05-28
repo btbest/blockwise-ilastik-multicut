@@ -29,13 +29,13 @@ WATERSHED_PARAMS = [
             "as zyxc for backwards compatibility."
         ),
     )),
-    ("--channel-index", dict(
-        dest="channel_index", type=int, default=None, metavar="N",
+    ("--probability-channel-index", dict(
+        dest="probability_channel_index", type=int, default=None, metavar="N",
         help=(
-            "Select channel N from the input channel axis.  Requires "
+            "Select channel N from the boundary probability channel axis.  Requires "
             "--input-axes or vigra axistags metadata so the channel axis can "
-            "be identified.  Without this option, inputs with a channel axis must have exactly "
-            "one channel."
+            "be identified.  This option applies only to --probabilities; "
+            "raw data must have no channel axis or exactly one channel."
         ),
     )),
     ("--output-dir", dict(

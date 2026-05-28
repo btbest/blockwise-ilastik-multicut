@@ -40,8 +40,9 @@ Both --raw and --probabilities accept local zarr stores and HDF5 files:
     /path/to/file.h5             HDF5 file (must contain exactly one dataset)
 
 Input axes are read from vigra axistags when present.  Use --input-axes to
-override or provide missing metadata, and --channel-index to select one channel
-from a multi-channel input.  Internally, data is presented as zyx.
+override or provide missing metadata, and --probability-channel-index to select
+one boundary probability channel from a multi-channel probability input.
+Internally, data is presented as zyx.
 
 When --raw and --probabilities are omitted and --ilp is given, all
 Raw Data + Probabilities lane pairs are read from the .ilp project
@@ -96,7 +97,7 @@ def _run_one_watershed(
         "raw":             raw_path,
         "probabilities":   prob_path,
         "input_axes":      args.input_axes,
-        "channel_index":   args.channel_index,
+        "probability_channel_index": args.probability_channel_index,
         "output_dir":      str(out.resolve()),
         "ilp":             args.ilp,
         "max_block_shape": args.max_block_shape,
@@ -136,9 +137,15 @@ def _run_one_watershed(
         boundary_arr = _as_zyx_lazy_array(
             boundary_arr,
             input_axes=args.input_axes,
-            channel_index=args.channel_index,
+            channel_index=args.probability_channel_index,
             source=prob_path,
         )
+        if boundary_arr.source_n_channels != 1 and args.probability_channel_index is None:
+            raise ValueError(
+                f"Probability data has {boundary_arr.source_n_channels} channels. "
+                "In this case, --probability-channel-index is required to specify which "
+                "probability channel corresponds to boundary probability."
+            )
         boundary_lazy = _Float32LazyArray(boundary_arr)
         vol_shape = tuple(boundary_lazy.shape)
         print(f"  Volume shape: {vol_shape}")

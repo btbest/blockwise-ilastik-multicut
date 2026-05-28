@@ -263,7 +263,13 @@ class _ZYXLazyArray:
     using ordinary zyx slice tuples.
     """
 
-    def __init__(self, arr, input_axes=None, channel_index=None, source="array"):
+    def __init__(
+        self,
+        arr,
+        input_axes=None,
+        selected_channel_index=None,
+        source="array",
+    ):
         self._arr = arr
         self._source = source
         self._source_shape = tuple(int(s) for s in arr.shape)
@@ -277,9 +283,9 @@ class _ZYXLazyArray:
             resolved_axes = metadata_axes
             self.axes_source = "axistags"
         else:
-            if channel_index is not None:
+            if selected_channel_index is not None:
                 raise ValueError(
-                    f"{source}: --channel-index requires axis metadata. "
+                    f"{source}: --probability-channel-index requires axis metadata. "
                     "Provide --input-axes or an input array with vigra axistags."
                 )
             resolved_axes = _default_axes_for_ndim(self._source_ndim, source)
@@ -302,24 +308,30 @@ class _ZYXLazyArray:
         self._channel_axis = (
             self.source_axes.index("c") if "c" in self.source_axes else None
         )
+        self.source_channel_axis = self._channel_axis
         if self._channel_axis is None:
-            self._channel_index = None
+            if selected_channel_index is not None:
+                warnings.warn(
+                    f"{source}: ignoring --probability-channel-index because "
+                    f"axes {self.source_axes!r} do not include a channel axis; "
+                    "continuing with the input as single-channel data.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            self.source_n_channels = 1
+            self._channel_index = 0
         else:
-            n_channels = self._source_shape[self._channel_axis]
-            if channel_index is None:
-                if n_channels != 1:
-                    raise ValueError(
-                        f"{source}: input has {n_channels} channels on axis "
-                        f"{self.source_axes!r}; pass --channel-index to select one."
-                    )
+            self.source_n_channels = self._source_shape[self._channel_axis]
+            if selected_channel_index is None:
+                # If this array requires channel selection, the caller should error
                 self._channel_index = 0
             else:
-                if channel_index < 0 or channel_index >= n_channels:
+                if selected_channel_index < 0 or selected_channel_index >= self.source_n_channels:
                     raise ValueError(
-                        f"{source}: channel index {channel_index} is out of "
-                        f"bounds for {n_channels} channels."
+                        f"{source}: channel index {selected_channel_index} is out of "
+                        f"bounds for {self.source_n_channels} channels."
                     )
-                self._channel_index = int(channel_index)
+                self._channel_index = int(selected_channel_index)
 
     def __getitem__(self, key):
         spatial_key = _expand_spatial_key(key)
@@ -328,6 +340,12 @@ class _ZYXLazyArray:
 
         for axis in self.source_axes:
             if axis == "c":
+                if self._channel_index is None:
+                    raise ValueError(
+                        f"{self._source}: input has {self.source_n_channels} "
+                        f"channels on axis {self.source_axes!r}, but no "
+                        "channel was selected."
+                    )
                 source_key.append(self._channel_index)
                 continue
 
@@ -354,10 +372,18 @@ class _ZYXLazyArray:
         return np.transpose(data, transpose_order)
 
 
-def _as_zyx_lazy_array(arr, input_axes=None, channel_index=None, source="array"):
+def _as_zyx_lazy_array(
+    arr,
+    input_axes=None,
+    channel_index=None,
+    source="array",
+):
     """Return a lazy array-like view with 3-D zyx shape."""
     return _ZYXLazyArray(
-        arr, input_axes=input_axes, channel_index=channel_index, source=source
+        arr,
+        input_axes=input_axes,
+        selected_channel_index=channel_index,
+        source=source,
     )
 
 
@@ -431,26 +457,75 @@ def _load_channel(path: str, key: str | None) -> np.ndarray:
 
 
 class _ChannelStore:
-    """Context manager that holds open lazy handles for all channels."""
+    """Context manager that holds open lazy handles for all channels.
 
-    def __init__(self, channel_specs: list, input_axes=None, channel_index=None):
+    ``probability_channel_index`` is applied only to ``boundary_channel``.
+    All other channels must already be scalar zyx data or have a singleton
+    channel axis.
+    """
+
+    def __init__(
+        self,
+        channel_specs: list,
+        input_axes=None,
+        boundary_channel=None,
+        probability_channel_index=None,
+    ):
         self._specs = channel_specs
         self._input_axes = input_axes
-        self._channel_index = channel_index
+        self._boundary_channel = boundary_channel
+        self._probability_channel_index = probability_channel_index
         self._handles = []
         self.arrays = {}  # channel_name → lazy array
 
     def __enter__(self):
-        for spec in self._specs:
-            ch_name, fpath, fkey = _parse_channel_spec(spec)
-            arr, fh = _open_channel_lazy(fpath, fkey)
-            arr = _as_zyx_lazy_array(
-                arr, input_axes=self._input_axes, channel_index=self._channel_index,
-                source=fpath,
+        if (
+            self._probability_channel_index is not None
+            and self._boundary_channel is None
+        ):
+            raise ValueError(
+                "probability_channel_index requires a boundary_channel so the "
+                "selection is not applied to raw data."
             )
-            self.arrays[ch_name] = arr
-            if fh is not None:
-                self._handles.append(fh)
+
+        try:
+            for spec in self._specs:
+                ch_name, fpath, fkey = _parse_channel_spec(spec)
+                arr, fh = _open_channel_lazy(fpath, fkey)
+                try:
+                    is_boundary = ch_name == self._boundary_channel
+                    channel_index = (
+                        self._probability_channel_index if is_boundary else None
+                    )
+                    arr = _as_zyx_lazy_array(
+                        arr,
+                        input_axes=self._input_axes,
+                        channel_index=channel_index,
+                        source=f"{fpath} ({ch_name})",
+                    )
+                    if is_boundary and arr.source_n_channels != 1 and channel_index is None:
+                        raise ValueError(
+                            f"Probability data has {arr.source_n_channels} channels. "
+                            "In this case, --probability-channel-index is required to specify which "
+                            "probability channel corresponds to boundary probability."
+                        )
+                    elif not is_boundary and arr.source_n_channels != 1:
+                        raise ValueError(
+                            f"{fpath} ({ch_name}): input has "
+                            f"{arr.source_n_channels} channels. "
+                            "Multi-channel raw data is not supported "
+                            "(please get in touch via github)."
+                        )
+                except Exception:
+                    if fh is not None:
+                        fh.close()
+                    raise
+                self.arrays[ch_name] = arr
+                if fh is not None:
+                    self._handles.append(fh)
+        except Exception:
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, *_):
@@ -1247,7 +1322,7 @@ def _run_lazy(
     mc_beta, mc_threshold,
     keep_watershed=True,
     input_axes=None,
-    channel_index=None,
+    probability_channel_index=None,
 ):
     import nifty
     import zarr
@@ -1256,12 +1331,16 @@ def _run_lazy(
 
     feature_names = read_feature_names(ilp_path)
 
+    boundary_channel = _find_boundary_channel(feature_names)
+
     # --- Open all channels lazily ---
     with _ChannelStore(
-        channel_specs, input_axes=input_axes, channel_index=channel_index
+        channel_specs,
+        input_axes=input_axes,
+        boundary_channel=boundary_channel,
+        probability_channel_index=probability_channel_index,
     ) as store:
         lazy_arrays = store.arrays
-        boundary_channel = _find_boundary_channel(feature_names)
         if boundary_channel not in lazy_arrays:
             raise KeyError(
                 f"Boundary channel {boundary_channel!r} not in provided channels. "

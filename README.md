@@ -174,7 +174,7 @@ that metadata or to provide axes for arrays that do not have it.
 Your raw data *must* either have no channel axis, or only have a single channel.
 
 Your boundary probability data *should* also be single-channel, but having multiple probability class is common.
-If your probability output has multiple channels, you can select the boundary channel explicitly using e.g. `--channel-index 0` for the first channel.
+If your probability data has multiple channels, you can select the boundary channel explicitly using e.g. `--probability-channel-index 0` for the first channel.
 
 If HDF5, there must only be one dataset inside the HDF5 file.
 
@@ -190,7 +190,7 @@ blimp --ilp project.ilp --raw raw.zarr --probabilities boundary.zarr --output-di
     --halo 32 32 32                     # block overlap (default)
     --threads 8                         # parallel threads (default)
     --input-axes cxyz                   # override input axis order
-    --channel-index 0                   # select a channel from multi-channel input
+    --probability-channel-index 0       # select boundary channel from probabilities
     --n-estimators 100                  # RF trees (default)
 ```
 
