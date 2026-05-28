@@ -84,7 +84,7 @@ WATERSHED_PARAMS = [
     )),
     ("--ws-invert", dict(
         action="store_true", default=False,
-        help="Invert the boundary probability map (p → 1-p) before running the "
+        help="Invert the boundary probability map (p -> 1-p) before running the "
              "watershed.  Use this when the probability file stores "
              "P(background) / P(interior) (high = interior) instead of "
              "P(boundary) (high = membrane).",
