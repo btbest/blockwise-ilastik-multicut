@@ -20,7 +20,7 @@ WATERSHED_PARAMS = [
         help="Boundary probability volume (zarr or h5 with a single dataset).  "
              "When omitted, all Probabilities lanes are read from the .ilp project file.",
     )),
-    (("--input-axes", "--input_axes"), dict(
+    ("--input-axes", dict(
         dest="input_axes", default=None, metavar="AXES",
         help=(
             "Hard override for input array axes, e.g. 'zyx', 'zyxc', or 'cxyz'.  "
@@ -29,7 +29,7 @@ WATERSHED_PARAMS = [
             "as zyxc for backwards compatibility."
         ),
     )),
-    (("--channel-index", "--channel_index"), dict(
+    ("--channel-index", dict(
         dest="channel_index", type=int, default=None, metavar="N",
         help=(
             "Select channel N from the input channel axis.  Requires "

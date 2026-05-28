@@ -104,13 +104,3 @@ def test_channel_index_bounds_are_checked():
             source="probs.h5",
         )
 
-
-def test_channel_index_alias_with_underscore_is_accepted():
-    import argparse
-    from _cli_params import add_watershed_args
-
-    parser = argparse.ArgumentParser()
-    add_watershed_args(parser)
-    args = parser.parse_args(["--channel_index", "1"])
-
-    assert args.channel_index == 1
