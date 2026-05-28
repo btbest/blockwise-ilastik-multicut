@@ -4,7 +4,9 @@ Run edge classifiers trained in ilastik on large 3D volumes.
 
 **blimp** is a command-line tool that takes a trained ilastik project, raw data, and boundary predictions—then outputs a final segmentation. The blockwise implementation allows it to handle volumes too large to fit in RAM.
 
-Terabyte-scale stress testing to be done :)
+**Current "largest known raw dataset processed with blimp" high-score**:
+
+20 GB
 
 ---
 
@@ -55,7 +57,7 @@ Before running blimp, gather three things:
 
 How to get these:
 
-### Raw data
+### 1. Raw data
 
 Your electron microscope :)
 
@@ -65,7 +67,7 @@ You need to pre-convert your dataset to HDF5 or Zarr, e.g.:
 - Using the Data Conversion workflow in ilastik (convert to "compressed hdf5" or "single-scale OME-Zarr")
 - Using another tool like `ngff-zarr`, `eubi-bridge`, ...
 
-### Boundary probabilities
+### 2. Boundary probabilities
 
 This involves three steps, with more detail on each step below:
 
@@ -73,7 +75,7 @@ This involves three steps, with more detail on each step below:
 2. Train a classifier for segmenting membranes (boundaries) in these subvolumes, or find a pre-trained model that does a good job.
 3. Once you have found or trained a decent classifier that works on your subvolumes, run the same classifier on the full dataset.
 
-#### 1. Subvolume extraction
+#### 2.1. Subvolume extraction
 
 There are many ways to extract subvolumes from large datasets.
 The best approach will probably to manually identify important regions in the dataset that need to be classified correctly.
@@ -81,7 +83,7 @@ The best approach will probably to manually identify important regions in the da
 * You could upload the dataset to Webknossos, create an annotation, and add Bounding Boxes to the annotation. Then download each bounding box individually.
 * You could have an LLM write a script for you.
 
-#### 2. Boundary classifier training
+#### 2.2. Boundary classifier training
 
 Our (obviously biased) recommendation: Use ilastik and train on your subvolumes.
 * Browse https://bioimage.io for a model with keywords like "electron microscopy", "boundary", "membrane", then try the models in the Neural Network workflow
@@ -89,7 +91,9 @@ Our (obviously biased) recommendation: Use ilastik and train on your subvolumes.
 * Autocontext workflow
 * Trainable Domain Adaptation workflow
 
-In each workflow, train a classifier that distinguishes "membrane" from "everything else". Configure the export to export a *single channel* - the membrane channel (use the subregion settings in the export settings dialog).
+In each workflow, train a classifier that distinguishes "membrane" from "everything else".
+
+Configure the export to keep *only a single channel* - the membrane channel (use the subregion settings in the export settings dialog).
 
 <details>
 <summary>Autocontext workflow tips (click to expand)</summary>
@@ -104,30 +108,12 @@ You can get creative with trying out different combinations of target classes in
 In practice, we usually tend towards "Round 1: Many classes. Round 2: Two classes".
 </details>
 
-<details>
-<summary>Extract a single channel from exported Probabilities (advanced) (click to expand)</summary>
-
-If you forgot to restrict the subregion inside ilastik, you can use one of the blimp utility scripts to extract the relevant channel in post.
-Depending on how you installed blimp, you might have to go searching for the script file :)
-
-```
-cd blockwise-ilastik-multicut
-python scripts/channel_extract.py gt_block_Probabilities.h5 2
-```
-
-The script expects two parameters (plus one optional):
-* The h5 probabilities export file from ilastik
-* The index of the boundary channel you want to extract. Remember channels are counted starting at 0! The second channel has index "1". The example above extracts the third channel.
-* `--dataset exported_data` (Optional): Not necessary unless you were manually writing multiple outputs to the same h5 file under different dataset names.
-
-</details>
-
-#### 3. Generate probabilities for the whole dataset
+#### 2.3. Generate probabilities for the whole dataset
 
 Use batch processing in the respective ilastik workflow that you trained on your subvolumes.
 Your dataset MUST be in HDF5 (.h5) format, or OME-Zarr, to make it possible for ilastik to process the dataset without trying to load it all and overloading your computer's memory.
 
-### Trained ilastik Multicut project
+### 3. Trained ilastik Multicut project
 
 Use the "Boundary-Based Segmentation with Multicut" workflow:
 * Input data: Load your raw data subvolumes, then switch to Probabilities tab and load the probabilities for each subvolume in the corresponding line
@@ -178,15 +164,17 @@ Final Segmentation
 | `params.json` | Call parameters for reproducibility |
 | `raw_watershed.zarr` | Watershed superpixels (for debug or reuse) |
 
-### Input formats
+### Input formats and data restrictions
 
 Both raw data and probabilities must be HDF5 or (OME-)Zarr arrays with z, y, x
 axes and optional c.  Axis order is read from vigra `axistags` metadata when
 present.  Use `--input-axes`, for example `--input-axes cxyz`, to override
 that metadata or to provide axes for arrays that do not have it.
 
-If a channel axis is present, the dataset must contain exactly one channel
-unless `--channel-index N` selects one explicitly.
+Your raw data *must* either have no channel axis, or only have a single channel.
+
+Your boundary probability data *should* also be single-channel, but having multiple probability class is common.
+If your probability output has multiple channels, you can select the boundary channel explicitly using e.g. `--channel-index 0` for the first channel.
 
 If HDF5, there must only be one dataset inside the HDF5 file.
 
