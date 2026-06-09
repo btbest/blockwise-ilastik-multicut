@@ -322,16 +322,20 @@ class _ZYXLazyArray:
             self._channel_index = 0
         else:
             self.source_n_channels = self._source_shape[self._channel_axis]
-            if selected_channel_index is None:
-                # If this array requires channel selection, the caller should error
-                self._channel_index = 0
-            else:
-                if selected_channel_index < 0 or selected_channel_index >= self.source_n_channels:
-                    raise ValueError(
-                        f"{source}: channel index {selected_channel_index} is out of "
-                        f"bounds for {self.source_n_channels} channels."
-                    )
-                self._channel_index = int(selected_channel_index)
+            if selected_channel_index is None and self.source_n_channels != 1:
+                raise ValueError(
+                    f"Received an input with {self.source_n_channels} channels. "
+                    "For multi-channel probabilities, pass --probability-channel-index"
+                    "to indicate which channel corresponds to boundary probability. "
+                    "Multi-channel raw data is not supported."
+                )
+            self._channel_index = int(selected_channel_index) if selected_channel_index else 0
+            if self._channel_index < 0 or self._channel_index >= self.source_n_channels:
+                raise ValueError(
+                    f"{source}: channel index {selected_channel_index} is out of "
+                    f"bounds for {self.source_n_channels} channels."
+                )
+
 
     def __getitem__(self, key):
         spatial_key = _expand_spatial_key(key)
@@ -340,12 +344,6 @@ class _ZYXLazyArray:
 
         for axis in self.source_axes:
             if axis == "c":
-                if self._channel_index is None:
-                    raise ValueError(
-                        f"{self._source}: input has {self.source_n_channels} "
-                        f"channels on axis {self.source_axes!r}, but no "
-                        "channel was selected."
-                    )
                 source_key.append(self._channel_index)
                 continue
 

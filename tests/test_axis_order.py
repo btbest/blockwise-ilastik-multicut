@@ -70,7 +70,7 @@ def test_input_axes_override_takes_precedence_over_axistags():
     np.testing.assert_array_equal(lazy[:, :, :], expected)
 
 
-def test_multi_channel_probability_input_requires_probability_channel_index():
+def test_multi_channel_input_requires_probability_channel_index():
     from multicut_from_ilp import _as_zyx_lazy_array
 
     data = np.zeros((2, 3, 4, 2), dtype=np.uint8)
@@ -80,7 +80,7 @@ def test_multi_channel_probability_input_requires_probability_channel_index():
         )
 
 
-def test_probability_channel_index_requires_explicit_or_metadata_axes():
+def test_channel_index_requires_explicit_or_metadata_axes():
     from multicut_from_ilp import _as_zyx_lazy_array
 
     data = np.zeros((2, 3, 4), dtype=np.uint8)
@@ -104,7 +104,7 @@ def test_probability_channel_index_requires_explicit_or_metadata_axes():
         )
 
 
-def test_probability_channel_index_bounds_are_checked():
+def test_channel_index_bounds_are_checked():
     from multicut_from_ilp import _as_zyx_lazy_array
 
     data = np.zeros((2, 3, 4, 2), dtype=np.uint8)
@@ -117,7 +117,7 @@ def test_probability_channel_index_bounds_are_checked():
         )
 
 
-def test_probability_channel_index_is_ignored_without_channel_axis():
+def test_channel_index_is_ignored_without_channel_axis():
     from multicut_from_ilp import _as_zyx_lazy_array
 
     data = np.arange(2 * 3 * 4, dtype=np.uint8).reshape(2, 3, 4)
@@ -188,7 +188,7 @@ def test_channel_store_rejects_multi_channel_raw_even_with_probability_index(tmp
     ]
     with pytest.raises(
         ValueError,
-        match="Raw/feature data must have no channel axis or exactly one channel",
+        match="Multi-channel raw data is not supported",
     ):
         with _ChannelStore(
             specs,

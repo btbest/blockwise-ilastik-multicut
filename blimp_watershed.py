@@ -140,12 +140,6 @@ def _run_one_watershed(
             channel_index=args.probability_channel_index,
             source=prob_path,
         )
-        if boundary_arr.source_n_channels != 1 and args.probability_channel_index is None:
-            raise ValueError(
-                f"Probability data has {boundary_arr.source_n_channels} channels. "
-                "In this case, --probability-channel-index is required to specify which "
-                "probability channel corresponds to boundary probability."
-            )
         boundary_lazy = _Float32LazyArray(boundary_arr)
         vol_shape = tuple(boundary_lazy.shape)
         print(f"  Volume shape: {vol_shape}")
